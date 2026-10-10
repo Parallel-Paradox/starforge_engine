@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const base = @import("src/base/build_mod.zig");
+const trace = @import("src/trace/build_mod.zig");
 
 pub const MOD_NAME = "starforge";
 
@@ -9,6 +10,9 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const build_base = base.build(b, target, optimize);
+    const build_trace = trace.build(b, target, optimize, &.{
+        .{ .name = base.MOD_NAME, .module = build_base.mod },
+    });
 
     _ = b.addModule(MOD_NAME, .{
         .root_source_file = b.path("src/mod.zig"),
@@ -16,11 +20,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = base.MOD_NAME, .module = build_base.mod },
+            .{ .name = trace.MOD_NAME, .module = build_trace.mod },
         },
     });
 
     const test_step = b.step("test", "Run all test suites");
     test_step.dependOn(build_base.test_step);
+    test_step.dependOn(build_trace.test_step);
 }
 
 pub fn buildTest(b: *std.Build, comptime name: []const u8, mod: *std.Build.Module) *std.Build.Step {
