@@ -1,4 +1,6 @@
 words = [
+    "deinit",
     "ecs",
+    "sso",
     "starforge",
 ]
