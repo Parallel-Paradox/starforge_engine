@@ -42,7 +42,7 @@ const BufPrintError = std.fmt.BufPrintError;
 /// Return a slice of the bytes printed.
 ///
 /// **Assertion:** `buffer` **MUST** be at least 19 bytes long.
-pub fn toString(self: @This(), buffer: []u8) []u8 {
+pub fn toStr(self: @This(), buffer: []u8) []u8 {
     return std.fmt.bufPrint(
         buffer,
         "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}",
@@ -88,7 +88,7 @@ test "fromUnixTimestamp converts date and time" {
     try expectEqual(5, time.seconds);
 }
 
-test "toString formats date and time" {
+test "toStr formats date and time" {
     const time = @This(){
         .year = 2024,
         .month = .jan,
@@ -98,6 +98,6 @@ test "toString formats date and time" {
         .seconds = 5,
     };
     var buffer: [19]u8 = undefined;
-    const printed = time.toString(&buffer);
+    const printed = time.toStr(&buffer);
     try expectEqualStrings("2024-01-02 03:04:05", printed);
 }
