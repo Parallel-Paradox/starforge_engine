@@ -46,6 +46,6 @@ pub const Flag = packed struct(u8) {
     }
 };
 
-pub fn initSpan(self: @This()) Span {
-    return self.tracer.initSpan(self);
+pub fn initSpan(self: @This(), options: Span.Options) Span {
+    return self.tracer.initSpan(self, options);
 }

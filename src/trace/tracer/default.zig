@@ -61,7 +61,7 @@ fn initTrace(ptr: *anyopaque) Trace {
     };
 }
 
-fn initSpan(ptr: *anyopaque, trace: Trace) Span {
+fn initSpan(ptr: *anyopaque, trace: Trace, options: Span.Options) Span {
     const self = this(ptr);
     const rand_src = base.random.IoSource{ .io = self.io };
     // Force the low bit so the id is never `Span.Id.invalid` (0).
@@ -69,20 +69,20 @@ fn initSpan(ptr: *anyopaque, trace: Trace) Span {
     return .{
         .trace = trace,
         .id = @enumFromInt(id),
-        .kind = .internal,
-        .name = "",
+        .kind = options.kind,
+        .name = options.name,
         .real_dur = .{},
         .awake_dur = .{},
     };
 }
 
-fn initEvent(ptr: *anyopaque, span: Span) Event {
+fn initEvent(ptr: *anyopaque, span: Span, options: Event.Options) Event {
     const self = this(ptr);
     return .{
         .trace = span.trace,
         .span_id = span.id,
-        .level = .info,
-        .name = "",
+        .level = options.level,
+        .name = options.name,
         .real_ts = Io.Clock.real.now(self.io),
     };
 }
@@ -109,7 +109,7 @@ test "span ids are never invalid" {
 
     const t = default.tracer();
     for (0..64) |_| {
-        const span = t.initSpan(t.initTrace());
+        const span = t.initSpan(t.initTrace(), .{ .name = "test" });
         try std.testing.expect(span.id.tryGet() != null);
         try std.testing.expectEqual(@as(u64, 1), span.id.get() & 1);
     }

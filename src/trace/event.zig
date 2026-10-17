@@ -52,6 +52,12 @@ pub const Level = enum(u8) {
     }
 };
 
+/// Options for creating an event.
+pub const Options = struct {
+    name: []const u8,
+    level: Level = .info,
+};
+
 /// Delivers the event to every registered subscriber.
 pub fn emit(self: *const @This()) void {
     self.trace.tracer.emitEvent(self.*);

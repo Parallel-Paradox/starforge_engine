@@ -88,6 +88,12 @@ pub const Kind = enum(u8) {
     }
 };
 
+/// Options for creating a span.
+pub const Options = struct {
+    name: []const u8,
+    kind: Kind = .internal,
+};
+
 pub const Duration = struct {
     begin: ?Timestamp = null,
     end: ?Timestamp = null,
@@ -133,13 +139,13 @@ pub fn emit(self: *@This()) void {
 }
 
 /// Creates a child span within the same trace, linked to this span as its parent.
-pub fn initSub(self: *const @This()) @This() {
-    var sub = self.trace.initSpan();
+pub fn initSub(self: *const @This(), options: Options) @This() {
+    var sub = self.trace.initSpan(options);
     sub.parent_id = self.id;
     return sub;
 }
 
 /// Creates a new event attached to this span.
-pub fn initEvent(self: *const @This()) Event {
-    return self.trace.tracer.initEvent(self.*);
+pub fn initEvent(self: *const @This(), options: Event.Options) Event {
+    return self.trace.tracer.initEvent(self.*, options);
 }

@@ -18,8 +18,8 @@ vtable: *const VTable,
 
 pub const VTable = struct {
     initTrace: *const fn (self: *anyopaque) Trace,
-    initSpan: *const fn (self: *anyopaque, trace: Trace) Span,
-    initEvent: *const fn (self: *anyopaque, span: Span) Event,
+    initSpan: *const fn (self: *anyopaque, trace: Trace, options: Span.Options) Span,
+    initEvent: *const fn (self: *anyopaque, span: Span, options: Event.Options) Event,
 
     getAllocator: *const fn (self: *anyopaque) Allocator,
     getIo: *const fn (self: *anyopaque) Io,
@@ -98,13 +98,13 @@ pub fn initTrace(self: @This()) Trace {
 }
 
 /// Creates a new span within the given trace.
-pub fn initSpan(self: @This(), trace: Trace) Span {
-    return self.vtable.initSpan(self.ptr, trace);
+pub fn initSpan(self: @This(), trace: Trace, options: Span.Options) Span {
+    return self.vtable.initSpan(self.ptr, trace, options);
 }
 
 /// Creates a new event attached to the given span.
-pub fn initEvent(self: @This(), span: Span) Event {
-    return self.vtable.initEvent(self.ptr, span);
+pub fn initEvent(self: @This(), span: Span, options: Event.Options) Event {
+    return self.vtable.initEvent(self.ptr, span, options);
 }
 
 /// Returns the allocator used by this tracer.
