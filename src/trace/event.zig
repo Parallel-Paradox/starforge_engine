@@ -51,3 +51,8 @@ pub const Level = enum(u8) {
         return @intFromEnum(self) < @intFromEnum(other);
     }
 };
+
+/// Delivers the event to every registered subscriber.
+pub fn emit(self: *const @This()) void {
+    self.trace.tracer.emitEvent(self.*);
+}

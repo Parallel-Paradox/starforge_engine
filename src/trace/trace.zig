@@ -4,7 +4,7 @@ const std = @import("std");
 
 const root = @import("mod.zig");
 const Tracer = root.Tracer;
-const Event = root.Event;
+const Span = root.Span;
 
 tracer: Tracer,
 id: Id,
@@ -45,3 +45,7 @@ pub const Flag = packed struct(u8) {
         return @bitCast(self);
     }
 };
+
+pub fn initSpan(self: @This()) Span {
+    return self.tracer.initSpan(self);
+}

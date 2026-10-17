@@ -12,16 +12,21 @@ ptr: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
-    recvSpan: *const fn (self: *anyopaque, span: Span) void,
-    recvEvent: *const fn (self: *anyopaque, event: Event) void,
+    spanStarted: *const fn (self: *anyopaque, span: Span) void,
+    spanEmitted: *const fn (self: *anyopaque, span: Span) void,
+    eventEmitted: *const fn (self: *anyopaque, event: Event) void,
 };
 
-pub fn recvSpan(self: @This(), span: Span) void {
-    self.vtable.recvSpan(self.ptr, span);
+pub fn spanStarted(self: @This(), span: Span) void {
+    self.vtable.spanStarted(self.ptr, span);
 }
 
-pub fn recvEvent(self: @This(), event: Event) void {
-    self.vtable.recvEvent(self.ptr, event);
+pub fn spanEmitted(self: @This(), span: Span) void {
+    self.vtable.spanEmitted(self.ptr, span);
+}
+
+pub fn eventEmitted(self: @This(), event: Event) void {
+    self.vtable.eventEmitted(self.ptr, event);
 }
 
 test {

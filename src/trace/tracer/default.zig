@@ -71,8 +71,8 @@ fn initSpan(ptr: *anyopaque, trace: Trace) Span {
         .id = @enumFromInt(id),
         .kind = .internal,
         .name = "",
-        .real_dur = .{ .begin = Io.Clock.real.now(self.io) },
-        .awake_dur = .{ .begin = Io.Clock.awake.now(self.io) },
+        .real_dur = .{},
+        .awake_dur = .{},
     };
 }
 

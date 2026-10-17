@@ -132,17 +132,24 @@ pub fn listSubscribers(self: @This()) []const Subscriber {
     return self.vtable.listSubscribers(self.ptr).inner.items;
 }
 
+/// Notifies every registered subscriber that a span has started.
+pub fn startSpan(self: @This(), span: Span) void {
+    for (self.listSubscribers()) |subscriber| {
+        subscriber.spanStarted(span);
+    }
+}
+
 /// Delivers a span to every registered subscriber.
 pub fn emitSpan(self: @This(), span: Span) void {
     for (self.listSubscribers()) |subscriber| {
-        subscriber.recvSpan(span);
+        subscriber.spanEmitted(span);
     }
 }
 
 /// Delivers an event to every registered subscriber.
 pub fn emitEvent(self: @This(), event: Event) void {
     for (self.listSubscribers()) |subscriber| {
-        subscriber.recvEvent(event);
+        subscriber.eventEmitted(event);
     }
 }
 

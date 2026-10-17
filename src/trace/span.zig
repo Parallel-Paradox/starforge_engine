@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const Timestamp = std.Io.Timestamp;
 
 const root = @import("mod.zig");
@@ -88,7 +89,7 @@ pub const Kind = enum(u8) {
 };
 
 pub const Duration = struct {
-    begin: Timestamp,
+    begin: ?Timestamp = null,
     end: ?Timestamp = null,
 };
 
@@ -102,3 +103,43 @@ pub const Link = struct {
     /// The attributes associated with the link, providing additional context.
     attrs: std.ArrayList(Attribute) = .empty,
 };
+
+/// Releases the links and attributes owned by the span.
+pub fn deinit(self: *@This()) void {
+    const allocator = self.trace.tracer.getAllocator();
+    for (self.links.items) |*link| {
+        for (link.attrs.items) |*attr| attr.deinit(allocator);
+        link.attrs.deinit(allocator);
+    }
+    self.links.deinit(allocator);
+    for (self.attrs.items) |*attr| attr.deinit(allocator);
+    self.attrs.deinit(allocator);
+}
+
+/// Records the begin timestamps of the span and notifies subscribers.
+pub fn start(self: *@This()) void {
+    const io = self.trace.tracer.getIo();
+    self.real_dur.begin = Io.Clock.real.now(io);
+    self.awake_dur.begin = Io.Clock.awake.now(io);
+    self.trace.tracer.startSpan(self.*);
+}
+
+/// Records the end timestamps of the span and delivers it to subscribers.
+pub fn emit(self: *@This()) void {
+    const io = self.trace.tracer.getIo();
+    self.real_dur.end = Io.Clock.real.now(io);
+    self.awake_dur.end = Io.Clock.awake.now(io);
+    self.trace.tracer.emitSpan(self.*);
+}
+
+/// Creates a child span within the same trace, linked to this span as its parent.
+pub fn initSub(self: *const @This()) @This() {
+    var sub = self.trace.initSpan();
+    sub.parent_id = self.id;
+    return sub;
+}
+
+/// Creates a new event attached to this span.
+pub fn initEvent(self: *const @This()) Event {
+    return self.trace.tracer.initEvent(self.*);
+}
