@@ -36,7 +36,7 @@ pub const Level = enum(u8) {
     /// termination.
     fatal = 5,
 
-    pub fn toString(self: @This()) []const u8 {
+    pub fn toStr(self: @This()) []const u8 {
         return switch (self) {
             .verbose => "VERBOSE",
             .debug => "DEBUG",

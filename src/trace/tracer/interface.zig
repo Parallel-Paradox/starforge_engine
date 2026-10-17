@@ -21,17 +21,11 @@ pub const VTable = struct {
     initSpan: *const fn (self: *anyopaque, trace: Trace) Span,
     initEvent: *const fn (self: *anyopaque, span: Span) Event,
 
-    allocator: *const fn (self: *anyopaque) Allocator,
-    io: *const fn (self: *anyopaque) Io,
+    getAllocator: *const fn (self: *anyopaque) Allocator,
+    getIo: *const fn (self: *anyopaque) Io,
 
-    subscribe: *const fn (self: *anyopaque, subscriber: Subscriber) Allocator.Error!void,
-    unsubscribe: *const fn (self: *anyopaque, subscriber: Subscriber) void,
-    emitSpan: *const fn (self: *anyopaque, span: Span) void,
-    emitEvent: *const fn (self: *anyopaque, event: Event) void,
-
-    setResource: *const fn (self: *anyopaque, resource: Attribute) Allocator.Error!void,
-    unsetResource: *const fn (self: *anyopaque, key: []const u8) void,
-    getResource: *const fn (self: *anyopaque, key: []const u8) ?*const Attribute,
+    listSubscribers: *const fn (self: *anyopaque) *SubscriberList,
+    listResources: *const fn (self: *anyopaque) *ResourceList,
 };
 
 pub const SubscriberList = struct {
@@ -60,18 +54,6 @@ pub const SubscriberList = struct {
             }
         }
     }
-
-    pub fn emitSpan(self: *const @This(), span: Span) void {
-        for (self.inner.items) |subscriber| {
-            subscriber.recvSpan(span);
-        }
-    }
-
-    pub fn emitEvent(self: *const @This(), event: Event) void {
-        for (self.inner.items) |subscriber| {
-            subscriber.recvEvent(event);
-        }
-    }
 };
 
 /// Resource attributes attached to every trace produced by this tracer.
@@ -89,11 +71,6 @@ pub const ResourceList = struct {
             if (std.mem.eql(u8, item.key, key)) return i;
         }
         return null;
-    }
-
-    pub fn get(self: *const @This(), key: []const u8) ?*const Attribute {
-        const index = self.tryGetResId(key) orelse return null;
-        return &self.inner.items[index];
     }
 
     /// Adds a resource, or replaces the existing one with the same key.
@@ -132,47 +109,64 @@ pub fn initEvent(self: @This(), span: Span) Event {
 
 /// Returns the allocator used by this tracer.
 pub fn getAllocator(self: @This()) Allocator {
-    return self.vtable.allocator(self.ptr);
+    return self.vtable.getAllocator(self.ptr);
 }
 
 /// Returns the `Io` instance used by this tracer.
 pub fn getIo(self: @This()) Io {
-    return self.vtable.io(self.ptr);
+    return self.vtable.getIo(self.ptr);
 }
 
 /// Registers a subscriber, ignoring it if it is already registered.
 pub fn subscribe(self: @This(), subscriber: Subscriber) Allocator.Error!void {
-    return self.vtable.subscribe(self.ptr, subscriber);
+    return self.vtable.listSubscribers(self.ptr).subscribe(self.getAllocator(), subscriber);
 }
 
 /// Removes a registered subscriber; does nothing if it is not registered.
 pub fn unsubscribe(self: @This(), subscriber: Subscriber) void {
-    self.vtable.unsubscribe(self.ptr, subscriber);
+    self.vtable.listSubscribers(self.ptr).unsubscribe(subscriber);
+}
+
+/// Returns all registered subscribers.
+pub fn listSubscribers(self: @This()) []const Subscriber {
+    return self.vtable.listSubscribers(self.ptr).inner.items;
 }
 
 /// Delivers a span to every registered subscriber.
 pub fn emitSpan(self: @This(), span: Span) void {
-    self.vtable.emitSpan(self.ptr, span);
+    for (self.listSubscribers()) |subscriber| {
+        subscriber.recvSpan(span);
+    }
 }
 
 /// Delivers an event to every registered subscriber.
 pub fn emitEvent(self: @This(), event: Event) void {
-    self.vtable.emitEvent(self.ptr, event);
+    for (self.listSubscribers()) |subscriber| {
+        subscriber.recvEvent(event);
+    }
 }
 
 /// Adds a resource, or replaces the existing one with the same key.
 pub fn setResource(self: @This(), resource: Attribute) Allocator.Error!void {
-    return self.vtable.setResource(self.ptr, resource);
+    return self.vtable.listResources(self.ptr).set(self.getAllocator(), resource);
 }
 
 /// Removes the resource with the given key; does nothing if absent.
 pub fn unsetResource(self: @This(), key: []const u8) void {
-    self.vtable.unsetResource(self.ptr, key);
+    self.vtable.listResources(self.ptr).unset(self.getAllocator(), key);
 }
 
 /// Returns the resource with the given key, or null if absent.
 pub fn getResource(self: @This(), key: []const u8) ?*const Attribute {
-    return self.vtable.getResource(self.ptr, key);
+    for (self.listResources()) |*attr| {
+        if (std.mem.eql(u8, attr.key, key)) return attr;
+    }
+    return null;
+}
+
+/// Returns all registered resources.
+pub fn listResources(self: @This()) []const Attribute {
+    return self.vtable.listResources(self.ptr).inner.items;
 }
 
 test {

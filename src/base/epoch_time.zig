@@ -39,15 +39,14 @@ pub fn fromUnixTimestamp(timestamp: Timestamp) @This() {
 const BufPrintError = std.fmt.BufPrintError;
 
 /// Transfer the `EpochTime` into a human-readable string format: "YYYY-MM-DD HH:MM:SS".
-/// Return a slice of the bytes printed.
-///
-/// **Assertion:** `buffer` **MUST** be at least 19 bytes long.
-pub fn toStr(self: @This(), buffer: []u8) []u8 {
-    return std.fmt.bufPrint(
-        buffer,
+pub fn toStr(self: @This()) [19]u8 {
+    var buffer: [19]u8 = undefined;
+    _ = std.fmt.bufPrint(
+        &buffer,
         "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}",
         .{ self.year, self.month, self.day, self.hours, self.minutes, self.seconds },
     ) catch unreachable;
+    return buffer;
 }
 
 const expectEqual = std.testing.expectEqual;
@@ -97,7 +96,6 @@ test "toStr formats date and time" {
         .minutes = 4,
         .seconds = 5,
     };
-    var buffer: [19]u8 = undefined;
-    const printed = time.toStr(&buffer);
-    try expectEqualStrings("2024-01-02 03:04:05", printed);
+    const printed = time.toStr();
+    try expectEqualStrings("2024-01-02 03:04:05", &printed);
 }

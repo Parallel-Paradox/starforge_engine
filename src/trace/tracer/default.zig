@@ -38,15 +38,10 @@ const vtable: Tracer.VTable = .{
     .initTrace = initTrace,
     .initSpan = initSpan,
     .initEvent = initEvent,
-    .allocator = getAllocator,
-    .io = getIo,
-    .subscribe = subscribe,
-    .unsubscribe = unsubscribe,
-    .emitSpan = emitSpan,
-    .emitEvent = emitEvent,
-    .setResource = setResource,
-    .unsetResource = unsetResource,
-    .getResource = getResource,
+    .getAllocator = getAllocator,
+    .getIo = getIo,
+    .listSubscribers = listSubscribers,
+    .listResources = listResources,
 };
 
 fn this(ptr: *anyopaque) *@This() {
@@ -100,35 +95,12 @@ fn getIo(ptr: *anyopaque) Io {
     return this(ptr).io;
 }
 
-fn subscribe(ptr: *anyopaque, subscriber: Subscriber) Allocator.Error!void {
-    const self = this(ptr);
-    return self.subscribers.subscribe(self.allocator, subscriber);
+fn listSubscribers(ptr: *anyopaque) *SubscriberList {
+    return &this(ptr).subscribers;
 }
 
-fn unsubscribe(ptr: *anyopaque, subscriber: Subscriber) void {
-    this(ptr).subscribers.unsubscribe(subscriber);
-}
-
-fn emitSpan(ptr: *anyopaque, span: Span) void {
-    this(ptr).subscribers.emitSpan(span);
-}
-
-fn emitEvent(ptr: *anyopaque, event: Event) void {
-    this(ptr).subscribers.emitEvent(event);
-}
-
-fn setResource(ptr: *anyopaque, resource: Attribute) Allocator.Error!void {
-    const self = this(ptr);
-    return self.resources.set(self.allocator, resource);
-}
-
-fn unsetResource(ptr: *anyopaque, key: []const u8) void {
-    const self = this(ptr);
-    self.resources.unset(self.allocator, key);
-}
-
-fn getResource(ptr: *anyopaque, key: []const u8) ?*const Attribute {
-    return this(ptr).resources.get(key);
+fn listResources(ptr: *anyopaque) *ResourceList {
+    return &this(ptr).resources;
 }
 
 test "span ids are never invalid" {
