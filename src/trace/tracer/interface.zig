@@ -1,0 +1,180 @@
+//! Tracer can be used to create traces and register subscribers.
+
+pub const Default = @import("default.zig");
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+
+const root = @import("../mod.zig");
+const Subscriber = root.Subscriber;
+const Trace = root.Trace;
+const Span = root.Span;
+const Event = root.Event;
+const Attribute = root.Attribute;
+
+ptr: *anyopaque,
+vtable: *const VTable,
+
+pub const VTable = struct {
+    initTrace: *const fn (self: *anyopaque) Trace,
+    initSpan: *const fn (self: *anyopaque, trace: Trace) Span,
+    initEvent: *const fn (self: *anyopaque, span: Span) Event,
+
+    allocator: *const fn (self: *anyopaque) Allocator,
+    io: *const fn (self: *anyopaque) Io,
+
+    subscribe: *const fn (self: *anyopaque, subscriber: Subscriber) Allocator.Error!void,
+    unsubscribe: *const fn (self: *anyopaque, subscriber: Subscriber) void,
+    emitSpan: *const fn (self: *anyopaque, span: Span) void,
+    emitEvent: *const fn (self: *anyopaque, event: Event) void,
+
+    setResource: *const fn (self: *anyopaque, resource: Attribute) Allocator.Error!void,
+    unsetResource: *const fn (self: *anyopaque, key: []const u8) void,
+    getResource: *const fn (self: *anyopaque, key: []const u8) ?*const Attribute,
+};
+
+pub const SubscriberList = struct {
+    inner: std.ArrayList(Subscriber),
+
+    pub fn deinit(self: *@This(), allocator: Allocator) void {
+        self.inner.deinit(allocator);
+    }
+
+    pub fn subscribe(
+        self: *@This(),
+        allocator: Allocator,
+        subscriber: Subscriber,
+    ) Allocator.Error!void {
+        for (self.inner.items) |item| {
+            if (std.meta.eql(item, subscriber)) return;
+        }
+        try self.inner.append(allocator, subscriber);
+    }
+
+    pub fn unsubscribe(self: *@This(), subscriber: Subscriber) void {
+        for (self.inner.items, 0..) |item, i| {
+            if (std.meta.eql(item, subscriber)) {
+                _ = self.inner.swapRemove(i);
+                return;
+            }
+        }
+    }
+
+    pub fn emitSpan(self: *const @This(), span: Span) void {
+        for (self.inner.items) |subscriber| {
+            subscriber.recvSpan(span);
+        }
+    }
+
+    pub fn emitEvent(self: *const @This(), event: Event) void {
+        for (self.inner.items) |subscriber| {
+            subscriber.recvEvent(event);
+        }
+    }
+};
+
+/// Resource attributes attached to every trace produced by this tracer.
+pub const ResourceList = struct {
+    inner: std.ArrayList(Attribute),
+
+    pub fn deinit(self: *@This(), allocator: Allocator) void {
+        for (self.inner.items) |*attr| attr.deinit(allocator);
+        self.inner.deinit(allocator);
+    }
+
+    /// Returns the index of the resource with the given key, or null if absent.
+    pub fn tryGetResId(self: *const @This(), key: []const u8) ?usize {
+        for (self.inner.items, 0..) |item, i| {
+            if (std.mem.eql(u8, item.key, key)) return i;
+        }
+        return null;
+    }
+
+    pub fn get(self: *const @This(), key: []const u8) ?*const Attribute {
+        const index = self.tryGetResId(key) orelse return null;
+        return &self.inner.items[index];
+    }
+
+    /// Adds a resource, or replaces the existing one with the same key.
+    pub fn set(self: *@This(), allocator: Allocator, resource: Attribute) Allocator.Error!void {
+        if (self.tryGetResId(resource.key)) |index| {
+            const old = &self.inner.items[index];
+            old.deinit(allocator);
+            old.* = resource;
+            return;
+        }
+        try self.inner.append(allocator, resource);
+    }
+
+    /// Removes the resource with the given key; does nothing if absent.
+    pub fn unset(self: *@This(), allocator: Allocator, key: []const u8) void {
+        const index = self.tryGetResId(key) orelse return;
+        self.inner.items[index].deinit(allocator);
+        _ = self.inner.swapRemove(index);
+    }
+};
+
+/// Creates a new trace.
+pub fn initTrace(self: @This()) Trace {
+    return self.vtable.initTrace(self.ptr);
+}
+
+/// Creates a new span within the given trace.
+pub fn initSpan(self: @This(), trace: Trace) Span {
+    return self.vtable.initSpan(self.ptr, trace);
+}
+
+/// Creates a new event attached to the given span.
+pub fn initEvent(self: @This(), span: Span) Event {
+    return self.vtable.initEvent(self.ptr, span);
+}
+
+/// Returns the allocator used by this tracer.
+pub fn getAllocator(self: @This()) Allocator {
+    return self.vtable.allocator(self.ptr);
+}
+
+/// Returns the `Io` instance used by this tracer.
+pub fn getIo(self: @This()) Io {
+    return self.vtable.io(self.ptr);
+}
+
+/// Registers a subscriber, ignoring it if it is already registered.
+pub fn subscribe(self: @This(), subscriber: Subscriber) Allocator.Error!void {
+    return self.vtable.subscribe(self.ptr, subscriber);
+}
+
+/// Removes a registered subscriber; does nothing if it is not registered.
+pub fn unsubscribe(self: @This(), subscriber: Subscriber) void {
+    self.vtable.unsubscribe(self.ptr, subscriber);
+}
+
+/// Delivers a span to every registered subscriber.
+pub fn emitSpan(self: @This(), span: Span) void {
+    self.vtable.emitSpan(self.ptr, span);
+}
+
+/// Delivers an event to every registered subscriber.
+pub fn emitEvent(self: @This(), event: Event) void {
+    self.vtable.emitEvent(self.ptr, event);
+}
+
+/// Adds a resource, or replaces the existing one with the same key.
+pub fn setResource(self: @This(), resource: Attribute) Allocator.Error!void {
+    return self.vtable.setResource(self.ptr, resource);
+}
+
+/// Removes the resource with the given key; does nothing if absent.
+pub fn unsetResource(self: @This(), key: []const u8) void {
+    self.vtable.unsetResource(self.ptr, key);
+}
+
+/// Returns the resource with the given key, or null if absent.
+pub fn getResource(self: @This(), key: []const u8) ?*const Attribute {
+    return self.vtable.getResource(self.ptr, key);
+}
+
+test {
+    _ = Default;
+}
