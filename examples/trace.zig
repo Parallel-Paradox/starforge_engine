@@ -17,7 +17,7 @@ pub fn main(init: std.process.Init) !void {
     var prev = t.initSpan(.{ .name = "http.request", .kind = .client });
     defer prev.deinit();
     prev.start();
-    try prev.addAttrs(.{ .attempt = @as(u64, 1) });
+    try prev.addAttrs(.{ .attempt = 1 });
     prev.emit();
 
     var root = t.initSpan(.{ .name = "db.transaction" });
@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
     var query = root.initSub(.{ .name = "db.query", .kind = .client });
     defer query.deinit();
     query.start();
-    try query.addAttrs(.{ .sql = "SELECT * FROM users", .rows = @as(u64, 3) });
+    try query.addAttrs(.{ .sql = "SELECT * FROM users", .rows = 3 });
 
     var query_event = query.initEvent(.{ .name = "cache.miss", .level = .warn });
     defer query_event.deinit();
@@ -41,7 +41,7 @@ pub fn main(init: std.process.Init) !void {
         event.emit();
     }
 
-    try query.linkTo(prev.trace.id, prev.id, .{ .reason = "retry", .attempt = @as(u64, 1) });
+    try query.linkTo(prev.trace.id, prev.id, .{ .reason = "retry", .attempt = 1 });
     query.status = .ok;
     query.emit();
 
