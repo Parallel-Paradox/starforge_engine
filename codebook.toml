@@ -1,7 +1,10 @@
 words = [
+    "comptime",
     "deinit",
     "ecs",
+    "ints",
     "sso",
     "starforge",
+    "strs",
     "vtable",
 ]

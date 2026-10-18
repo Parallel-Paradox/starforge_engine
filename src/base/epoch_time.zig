@@ -49,6 +49,26 @@ pub fn toStr(self: @This()) [19]u8 {
     return buffer;
 }
 
+pub fn toDateStr(self: @This()) [10]u8 {
+    var buffer: [10]u8 = undefined;
+    _ = std.fmt.bufPrint(
+        &buffer,
+        "{d:0>4}-{d:0>2}-{d:0>2}",
+        .{ self.year, self.month, self.day },
+    ) catch unreachable;
+    return buffer;
+}
+
+pub fn toClockStr(self: @This()) [8]u8 {
+    var buffer: [8]u8 = undefined;
+    _ = std.fmt.bufPrint(
+        &buffer,
+        "{d:0>2}:{d:0>2}:{d:0>2}",
+        .{ self.hours, self.minutes, self.seconds },
+    ) catch unreachable;
+    return buffer;
+}
+
 const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expectError = std.testing.expectError;
