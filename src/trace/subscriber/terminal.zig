@@ -199,7 +199,9 @@ fn eventEmitted(ptr: *anyopaque, event: Event) void {
         .err => .red,
         .fatal => .bright_red,
     }) catch {};
-    terminal.setColor(.bold) catch {};
+    if (event.level == .fatal) {
+        terminal.setColor(.bold) catch {};
+    }
     writer.print(" ● {s:<5}", .{event.level.toStr()}) catch {};
     terminal.setColor(.reset) catch {};
 
