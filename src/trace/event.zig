@@ -21,7 +21,7 @@ attrs: std.ArrayList(Attribute) = .empty,
 /// Level defines the severity of an event. It is used to filter events based on their importance.
 pub const Level = enum(u8) {
     /// Detailed information for diagnosing problems.
-    verbose = 0,
+    trace = 0,
     /// Debug information for development.
     debug = 1,
     /// Confirmation that things are working as expected.
@@ -38,7 +38,7 @@ pub const Level = enum(u8) {
 
     pub fn toStr(self: @This()) []const u8 {
         return switch (self) {
-            .verbose => "VERBOSE",
+            .trace => "TRACE",
             .debug => "DEBUG",
             .info => "INFO",
             .warn => "WARN",
@@ -46,7 +46,6 @@ pub const Level = enum(u8) {
             .fatal => "FATAL",
         };
     }
-
 };
 
 /// Options for creating an event.

@@ -17,7 +17,7 @@ const EpochTime = base.EpochTime;
 level_mask: LevelMask,
 
 pub const LevelMask = packed struct(u8) {
-    verbose: bool = false,
+    trace: bool = false,
     debug: bool = switch (builtin.mode) {
         .Debug => true,
         else => false,
@@ -36,7 +36,7 @@ pub const LevelMask = packed struct(u8) {
 
     pub fn filter(self: LevelMask, level: Event.Level) bool {
         return switch (level) {
-            .verbose => self.verbose,
+            .trace => self.trace,
             .debug => self.debug,
             .info => self.info,
             .warn => self.warn,
@@ -165,8 +165,7 @@ fn spanDurationMs(span: Span) i96 {
     return @divTrunc(begin.durationTo(end).toNanoseconds(), std.time.ns_per_ms);
 }
 
-/// ● LEVEL HH:MM:SS trace_id-span_id name
-///   attributes
+/// HH:MM:SS trace_id-span_id ● LEVEL name attributes
 fn eventEmitted(ptr: *anyopaque, event: Event) void {
     const self = this(ptr);
 
@@ -184,9 +183,16 @@ fn eventEmitted(ptr: *anyopaque, event: Event) void {
     const terminal = stderr.terminal();
     const writer = terminal.writer;
 
+    // HH:MM:SS trace_id-span_id
+    terminal.setColor(.dim) catch {};
+    const epoch_time = EpochTime.fromUnixTimestamp(event.real_ts).toClockStr();
+    const join_id = joinId(event.trace.id, event.span_id);
+    writer.print("{s} {s}", .{ epoch_time, join_id }) catch {};
+    terminal.setColor(.reset) catch {};
+
     // LEVEL
     terminal.setColor(switch (event.level) {
-        .verbose => .dim,
+        .trace => .dim,
         .debug => .reset,
         .info => .green,
         .warn => .yellow,
@@ -194,27 +200,21 @@ fn eventEmitted(ptr: *anyopaque, event: Event) void {
         .fatal => .bright_red,
     }) catch {};
     terminal.setColor(.bold) catch {};
-    writer.print("● {s:<5} ", .{event.level.toStr()}) catch {};
+    writer.print(" ● {s:<5}", .{event.level.toStr()}) catch {};
     terminal.setColor(.reset) catch {};
 
-    // HH:MM:SS trace_id-span_id
-    terminal.setColor(.dim) catch {};
-    const epoch_time = EpochTime.fromUnixTimestamp(event.real_ts).toClockStr();
-    const join_id = joinId(event.trace.id, event.span_id);
-    writer.print("{s} {s}", .{ epoch_time, join_id }) catch {};
-    if (event.level != .verbose) {
-        terminal.setColor(.reset) catch {};
+    if (event.level == .trace) {
+        terminal.setColor(.dim) catch {};
     }
 
     // name
-    writer.print(" {s}\n", .{event.name}) catch {};
+    writer.print(" {s} ", .{event.name}) catch {};
 
     // attributes
     if (event.attrs.items.len > 0) {
-        writer.writeAll("  ") catch {};
         writeAttributes(writer, event.attrs.items);
-        writer.writeByte('\n') catch {};
     }
+    writer.writeByte('\n') catch {};
     terminal.setColor(.reset) catch {};
 }
 
