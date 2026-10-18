@@ -108,15 +108,18 @@ pub const Link = struct {
     span_id: Id,
     /// The attributes associated with the link, providing additional context.
     attrs: std.ArrayList(Attribute) = .empty,
+
+    /// Releases the attributes owned by the link.
+    pub fn deinit(self: *@This(), allocator: Allocator) void {
+        for (self.attrs.items) |*attr| attr.deinit(allocator);
+        self.attrs.deinit(allocator);
+    }
 };
 
 /// Releases the links and attributes owned by the span.
 pub fn deinit(self: *@This()) void {
     const allocator = self.trace.tracer.getAllocator();
-    for (self.links.items) |*link| {
-        for (link.attrs.items) |*attr| attr.deinit(allocator);
-        link.attrs.deinit(allocator);
-    }
+    for (self.links.items) |*link| link.deinit(allocator);
     self.links.deinit(allocator);
     for (self.attrs.items) |*attr| attr.deinit(allocator);
     self.attrs.deinit(allocator);
@@ -148,4 +151,38 @@ pub fn initSub(self: *const @This(), options: Options) @This() {
 /// Creates a new event attached to this span.
 pub fn initEvent(self: *const @This(), options: Event.Options) Event {
     return self.trace.tracer.initEvent(self.*, options);
+}
+
+/// Appends each field of the struct `attrs` as an attribute. See `Attribute.appendStruct`.
+pub fn addAttrs(self: *@This(), attrs: anytype) (Allocator.Error || Attribute.FormatError)!void {
+    return Attribute.appendStruct(self.trace.tracer.getAllocator(), &self.attrs, attrs);
+}
+
+/// Records a link to another span, with the struct `attrs` as its attributes.
+pub fn linkTo(
+    self: *@This(),
+    trace_id: Trace.Id,
+    span_id: Id,
+    attrs: anytype,
+) (Allocator.Error || Attribute.FormatError)!void {
+    const allocator = self.trace.tracer.getAllocator();
+    var new_link: Link = .{ .trace_id = trace_id, .span_id = span_id };
+    errdefer new_link.deinit(allocator);
+    try Attribute.appendStruct(allocator, &new_link.attrs, attrs);
+    try self.links.append(allocator, new_link);
+}
+
+test "link records the target and its attributes" {
+    const allocator = std.testing.allocator;
+    var default = root.Tracer.Default.init(allocator, std.testing.io);
+    defer default.deinit();
+
+    const t = default.tracer();
+    var span = t.initSpan(t.initTrace(), .{ .name = "test" });
+    defer span.deinit();
+
+    try span.linkTo(span.trace.id, span.id, .{ .k = @as(i64, 7) });
+    try std.testing.expectEqual(@as(usize, 1), span.links.items.len);
+    try std.testing.expectEqual(span.id, span.links.items[0].span_id);
+    try std.testing.expectEqual(@as(i64, 7), span.links.items[0].attrs.items[0].value.Int);
 }

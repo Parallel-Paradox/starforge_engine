@@ -47,9 +47,6 @@ pub const Level = enum(u8) {
         };
     }
 
-    pub fn lessThan(self: @This(), other: @This()) bool {
-        return @intFromEnum(self) < @intFromEnum(other);
-    }
 };
 
 /// Options for creating an event.
@@ -57,6 +54,18 @@ pub const Options = struct {
     name: []const u8,
     level: Level = .info,
 };
+
+/// Releases the attributes owned by the event.
+pub fn deinit(self: *@This()) void {
+    const allocator = self.trace.tracer.getAllocator();
+    for (self.attrs.items) |*attr| attr.deinit(allocator);
+    self.attrs.deinit(allocator);
+}
+
+/// Appends each field of the struct `attrs` as an attribute. See `Attribute.appendStruct`.
+pub fn addAttrs(self: *@This(), attrs: anytype) (Allocator.Error || Attribute.FormatError)!void {
+    return Attribute.appendStruct(self.trace.tracer.getAllocator(), &self.attrs, attrs);
+}
 
 /// Delivers the event to every registered subscriber.
 pub fn emit(self: *const @This()) void {

@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = base.MOD_NAME, .module = build_base.mod },
     });
 
-    _ = b.addModule(MOD_NAME, .{
+    const mod_starforge = b.addModule(MOD_NAME, .{
         .root_source_file = b.path("src/mod.zig"),
         .target = target,
         .optimize = optimize,
@@ -27,6 +27,8 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all test suites");
     test_step.dependOn(build_base.test_step);
     test_step.dependOn(build_trace.test_step);
+
+    buildExamples(b, target, optimize, mod_starforge);
 }
 
 pub fn buildTest(b: *std.Build, comptime name: []const u8, mod: *std.Build.Module) *std.Build.Step {
@@ -41,4 +43,45 @@ pub fn buildTest(b: *std.Build, comptime name: []const u8, mod: *std.Build.Modul
     const test_mod_cmd = b.addRunArtifact(mod_tests);
     test_step.dependOn(&test_mod_cmd.step);
     return &test_mod_cmd.step;
+}
+
+fn buildExamples(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    mod_starforge: *std.Build.Module,
+) void {
+    inline for ([_]struct {
+        name: []const u8,
+        path: []const u8,
+    }{
+        .{ .name = "trace", .path = "examples/trace.zig" },
+    }) |example_config| {
+        const name = example_config.name;
+        const path = example_config.path;
+
+        const prefix = "example-" ++ name;
+        const example_mod = b.addModule(prefix, .{
+            .root_source_file = b.path(path),
+            .target = target,
+            .optimize = optimize,
+        });
+        example_mod.addImport("starforge", mod_starforge);
+
+        const example = b.addExecutable(.{
+            .name = prefix,
+            .root_module = example_mod,
+        });
+        const build_example_cmd = b.addInstallArtifact(example, .{});
+
+        // Add cmd: zig build example-{name}
+        const run_step_desc = "Run example: " ++ name;
+        const run_step = b.step(prefix, run_step_desc);
+        const run_example_cmd = b.addRunArtifact(example);
+        run_example_cmd.step.dependOn(&build_example_cmd.step);
+        run_step.dependOn(&run_example_cmd.step);
+        if (b.args) |args| {
+            run_example_cmd.addArgs(args);
+        }
+    }
 }

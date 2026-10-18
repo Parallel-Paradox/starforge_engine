@@ -72,6 +72,11 @@ pub const Value = union(enum) {
         return @unionInit(Value, @tagName(tag), val);
     }
 
+    /// Whether `T` can be converted by `from` (scalars and strings) or `fromArray` (arrays).
+    pub fn isConvertible(comptime T: type) bool {
+        return tagFor(T) != null or ArrayValue.isConvertibleArray(T);
+    }
+
     /// Wraps the result of `ArrayValue.from` in the `Array` variant.
     pub fn fromArray(allocator: Allocator, val: anytype) ArrayValue.ConvertError!Value {
         return .{ .Array = try ArrayValue.from(allocator, val) };
@@ -163,6 +168,13 @@ pub const ArrayValue = union(enum) {
         };
     }
 
+    fn isConvertibleArray(comptime T: type) bool {
+        inline for (@typeInfo(ArrayValue).@"union".fields) |field| {
+            if (T == field.type) return true;
+        }
+        return isSequence(T) and Value.tagFor(T) == null and Value.tagFor(std.meta.Elem(T)) != null;
+    }
+
     fn isSequence(comptime T: type) bool {
         return switch (@typeInfo(T)) {
             .array => true,
@@ -207,6 +219,46 @@ pub const ArrayValue = union(enum) {
         try writer.writeAll("]");
     }
 };
+
+/// Errors produced when turning a struct of named fields into attributes.
+pub const FormatError = error{
+    NotStruct,
+    InvalidFieldType,
+};
+
+/// Appends each field of `fields` to `list` as an attribute keyed by the field name.
+/// `String` and `ArrayList` fields are moved into `list`; `[]const u8` is borrowed.
+pub fn appendStruct(
+    allocator: Allocator,
+    list: *std.ArrayList(@This()),
+    fields: anytype,
+) (Allocator.Error || FormatError)!void {
+    const field_info = switch (@typeInfo(@TypeOf(fields))) {
+        .@"struct" => |info| info.fields,
+        else => return FormatError.NotStruct,
+    };
+    inline for (field_info) |field| {
+        if (comptime !Value.isConvertible(field.type)) return FormatError.InvalidFieldType;
+    }
+
+    inline for (field_info) |field| {
+        var value = try toValue(allocator, field.type, @field(fields, field.name));
+        errdefer value.deinit(allocator);
+        try list.append(allocator, .{ .key = field.name, .value = value });
+    }
+}
+
+/// Converts a field already validated by `Value.isConvertible`. The conversion errors other
+/// than allocation failure are unreachable for such types.
+fn toValue(allocator: Allocator, comptime T: type, val: T) Allocator.Error!Value {
+    if (comptime Value.tagFor(T) != null) {
+        return Value.from(val) catch unreachable;
+    }
+    return Value.fromArray(allocator, val) catch |err| switch (err) {
+        error.InvalidType => unreachable,
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
 
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expectEqual = std.testing.expectEqual;
@@ -339,6 +391,73 @@ test "from converts every supported scalar" {
 
     const str_value = try Value.from(@as([]const u8, "x"));
     try expectEqualStrings("x", str_value.Str);
+}
+
+test "appendStruct appends each struct field as an attribute" {
+    const allocator = std.testing.allocator;
+
+    var list = try std.ArrayList(@This()).initCapacity(allocator, 1);
+    defer {
+        for (list.items) |*attr| attr.deinit(allocator);
+        list.deinit(allocator);
+    }
+
+    var num_list = try std.ArrayList(u64).initCapacity(allocator, 1);
+    try num_list.append(allocator, 3);
+
+    try appendStruct(allocator, &list, .{
+        .x = 1,
+        .y = @as(f64, 2.5),
+        .name = "hi",
+        .ids = [_]i64{ 1, 2 },
+        .owned = try String.fromSlice(allocator, "owned"),
+        .list = num_list,
+    });
+
+    try expectEqual(@as(usize, 6), list.items.len);
+    try expectEqualStrings("x", list.items[0].key);
+    try expectEqual(@as(i64, 1), list.items[0].value.Int);
+    try expectEqualStrings("owned", list.items[4].value.String.slice());
+    try expectEqual(@as(u64, 3), list.items[5].value.Array.Uint.items[0]);
+}
+
+test "appendStruct frees a moved owned value when append fails" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const allocator = failing.allocator();
+
+    var list: std.ArrayList(@This()) = .empty;
+    defer list.deinit(allocator);
+
+    const owned = try String.fromSlice(std.testing.allocator, "a" ** 64);
+    try expectError(error.OutOfMemory, appendStruct(allocator, &list, .{ .owned = owned }));
+}
+
+test "appendStruct rejects non-struct and unsupported fields" {
+    const allocator = std.testing.allocator;
+
+    var list: std.ArrayList(@This()) = .empty;
+    defer list.deinit(allocator);
+
+    try expectError(FormatError.NotStruct, appendStruct(allocator, &list, @as(i64, 1)));
+    try expectError(FormatError.InvalidFieldType, appendStruct(allocator, &list, .{ .x = null }));
+    try expectEqual(@as(usize, 0), list.items.len);
+}
+
+test "appendStruct builds attributes for event and link lists" {
+    const allocator = std.testing.allocator;
+
+    var event_attrs: std.ArrayList(@This()) = .empty;
+    defer {
+        for (event_attrs.items) |*attr| attr.deinit(allocator);
+        event_attrs.deinit(allocator);
+    }
+    try appendStruct(allocator, &event_attrs, .{ .k = "v" });
+    try expectEqual(@as(usize, 1), event_attrs.items.len);
+
+    var link_attrs: std.ArrayList(@This()) = .empty;
+    defer link_attrs.deinit(allocator);
+    try appendStruct(allocator, &link_attrs, .{ .x = @as(i64, -1) });
+    try expectEqual(@as(i64, -1), link_attrs.items[0].value.Int);
 }
 
 test "from takes ownership of a String" {
