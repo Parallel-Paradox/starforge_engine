@@ -7,6 +7,7 @@ const Io = std.Io;
 const Timestamp = std.Io.Timestamp;
 
 const root = @import("mod.zig");
+const base = root.base;
 const Trace = root.Trace;
 const Event = root.Event;
 const Attribute = root.Attribute;
@@ -26,24 +27,7 @@ links: std.ArrayList(Link) = .empty,
 attrs: std.ArrayList(Attribute) = .empty,
 
 /// Unique identifier of a span, backed by a 64-bit integer.
-pub const Id = enum(u64) {
-    /// Sentinel value meaning no valid trace id.
-    invalid = 0,
-    _,
-
-    /// Returns the raw 64-bit value of a valid id.
-    /// Asserts (in safe build modes) that the id is not `invalid`.
-    pub fn get(self: Id) u64 {
-        std.debug.assert(self != Id.invalid);
-        return @intFromEnum(self);
-    }
-
-    /// Returns the raw 64-bit value, or `null` if the id is `invalid`.
-    pub fn tryGet(self: Id) ?u64 {
-        if (self == Id.invalid) return null;
-        return @intFromEnum(self);
-    }
-};
+pub const Id = base.niche.NonZero(u64);
 
 /// Status defines the outcome of a span, indicating whether it completed successfully or
 /// encountered an error.

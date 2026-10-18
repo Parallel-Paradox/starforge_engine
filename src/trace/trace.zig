@@ -3,6 +3,7 @@
 const std = @import("std");
 
 const root = @import("mod.zig");
+const base = root.base;
 const Tracer = root.Tracer;
 const Span = root.Span;
 
@@ -11,24 +12,7 @@ id: Id,
 flag: Flag,
 
 /// Unique identifier of a trace, backed by a 128-bit integer.
-pub const Id = enum(u128) {
-    /// Sentinel value meaning no valid trace id.
-    invalid = 0,
-    _,
-
-    /// Returns the raw 128-bit value of a valid id.
-    /// Asserts (in safe build modes) that the id is not `invalid`.
-    pub fn get(self: Id) u128 {
-        std.debug.assert(self != Id.invalid);
-        return @intFromEnum(self);
-    }
-
-    /// Returns the raw 128-bit value, or `null` if the id is `invalid`.
-    pub fn tryGet(self: Id) ?u128 {
-        if (self == Id.invalid) return null;
-        return @intFromEnum(self);
-    }
-};
+pub const Id = base.niche.NonZero(u128);
 
 /// Control the behavior of the trace.
 pub const Flag = packed struct(u8) {
