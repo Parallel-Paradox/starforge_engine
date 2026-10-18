@@ -2,6 +2,8 @@ const std = @import("std");
 
 const base = @import("src/base/build_mod.zig");
 const trace = @import("src/trace/build_mod.zig");
+const reflect = @import("src/reflect/build_mod.zig");
+const ecs = @import("src/ecs/build_mod.zig");
 
 pub const MOD_NAME = "starforge";
 
@@ -12,6 +14,15 @@ pub fn build(b: *std.Build) void {
     const build_base = base.build(b, target, optimize);
     const build_trace = trace.build(b, target, optimize, &.{
         .{ .name = base.MOD_NAME, .module = build_base.mod },
+    });
+    const build_reflect = reflect.build(b, target, optimize, &.{
+        .{ .name = base.MOD_NAME, .module = build_base.mod },
+        .{ .name = trace.MOD_NAME, .module = build_trace.mod },
+    });
+    const build_ecs = ecs.build(b, target, optimize, &.{
+        .{ .name = base.MOD_NAME, .module = build_base.mod },
+        .{ .name = trace.MOD_NAME, .module = build_trace.mod },
+        .{ .name = reflect.MOD_NAME, .module = build_reflect.mod },
     });
 
     const mod_starforge = b.addModule(MOD_NAME, .{
@@ -27,6 +38,8 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all test suites");
     test_step.dependOn(build_base.test_step);
     test_step.dependOn(build_trace.test_step);
+    test_step.dependOn(build_reflect.test_step);
+    test_step.dependOn(build_ecs.test_step);
 
     buildExamples(b, target, optimize, mod_starforge);
 }

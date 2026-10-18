@@ -1,0 +1,26 @@
+const std = @import("std");
+const root = @import("../../build.zig");
+
+pub const MOD_NAME = "reflect";
+
+pub fn build(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    imports: []const std.Build.Module.Import,
+) struct {
+    mod: *std.Build.Module,
+    test_step: *std.Build.Step,
+} {
+    const mod = b.addModule(root.MOD_NAME ++ "_" ++ MOD_NAME, .{
+        .root_source_file = b.path("src/reflect/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = imports,
+    });
+
+    return .{
+        .mod = mod,
+        .test_step = root.buildTest(b, MOD_NAME, mod),
+    };
+}
