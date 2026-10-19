@@ -2,6 +2,7 @@ words = [
     "comptime",
     "deinit",
     "ecs",
+    "eql",
     "ints",
     "sso",
     "starforge",
