@@ -17,7 +17,6 @@ pub fn build(b: *std.Build) void {
     });
     const build_reflect = reflect.build(b, target, optimize, &.{
         .{ .name = base.MOD_NAME, .module = build_base.mod },
-        .{ .name = trace.MOD_NAME, .module = build_trace.mod },
     });
     const build_ecs = ecs.build(b, target, optimize, &.{
         .{ .name = base.MOD_NAME, .module = build_base.mod },
