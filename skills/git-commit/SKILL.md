@@ -15,12 +15,22 @@ description: Write git commit messages using the Conventional Commits format. Us
 <footer>
 ```
 
+## Example
+
+```
+feat(base): add NonInt.from constructor
+
+Raw construction via @enumFromInt silently accepts the reserved sentinel.
+NonInt.from asserts that the value is valid, and trace and span ids are now
+built through it.
+```
+
 ## Rules
 
 - type (required): feat, fix, docs, refactor, perf, test, build, ci, chore.
 - scope (optional): the affected module, e.g. base, trace, ecs.
 - subject (required): imperative mood, no trailing period.
-- body (optional): Explain why the change was made, not what the code does.
+- body (optional): explain why the change was made, not what the code does.
 - footer (optional): issue references (Closes #123) and breaking changes.
 - Breaking changes: add ! after the type/scope, and a BREAKING CHANGE: footer to describe for complex changes.
 - Unless explicitly requested, do not write a Co-authored-by agent field in the footer.
