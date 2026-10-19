@@ -276,8 +276,8 @@ fn writeAttributes(writer: *Writer, attrs: []const Attribute) void {
 const expectEqualStrings = std.testing.expectEqualStrings;
 
 test "joinId takes 32 bits from rand_a upward and 16 bits of span id" {
-    const trace_id: Trace.Id = @enumFromInt(0x01234567_89abcdef_fedcba98_76543210);
-    const span_id: Span.Id = @enumFromInt(0x00ff_aabb_ccdd_eeff);
+    const trace_id = Trace.Id.from(0x01234567_89abcdef_fedcba98_76543210);
+    const span_id = Span.Id.from(0x00ff_aabb_ccdd_eeff);
     const joined = joinId(trace_id, span_id);
     try expectEqualStrings("89abcdef-00ff", &joined);
 }

@@ -56,7 +56,7 @@ fn initTrace(ptr: *anyopaque) Trace {
         base.Uuid.V4.init(.{ .io = self.io }).toU128();
     return .{
         .tracer = self.tracer(),
-        .id = @enumFromInt(id),
+        .id = Trace.Id.from(id),
         .flag = .{ .sampled = true },
     };
 }
@@ -68,7 +68,7 @@ fn initSpan(ptr: *anyopaque, trace: Trace, options: Span.Options) Span {
     const id = rand_src.interface().int(u64) | 1;
     return .{
         .trace = trace,
-        .id = @enumFromInt(id),
+        .id = Span.Id.from(id),
         .kind = options.kind,
         .name = options.name,
         .real_dur = .{},

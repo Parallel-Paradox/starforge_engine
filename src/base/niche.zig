@@ -22,6 +22,13 @@ fn NonInt(comptime i: type, comptime num: comptime_int) type {
         invalid = num,
         _,
 
+        /// Returns a value built from the raw integer `val`.
+        /// Asserts (in safe build modes) that `val` is not the reserved value `num`.
+        pub fn from(val: i) @This() {
+            std.debug.assert(val != num);
+            return @enumFromInt(val);
+        }
+
         /// Returns the raw value of a valid value.
         /// Asserts (in safe build modes) that the value is not `invalid`.
         pub fn get(self: @This()) i {
@@ -38,6 +45,13 @@ fn NonInt(comptime i: type, comptime num: comptime_int) type {
 }
 
 const expectEqual = std.testing.expectEqual;
+
+test "NonInt from" {
+    const T = NonInt(i32, -7);
+    const v = T.from(123);
+    try expectEqual(123, v.get());
+    try expectEqual(123, v.tryGet().?);
+}
 
 test "NonInt with signed and unsigned custom sentinel" {
     const Signed = NonInt(i8, -1);
