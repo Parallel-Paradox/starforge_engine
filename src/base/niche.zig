@@ -3,41 +3,41 @@
 const std = @import("std");
 
 /// Integer type of `i` excluding `0`.
-pub fn NonZero(comptime i: type) type {
-    return NonInt(i, 0);
+pub fn NonZero(comptime I: type) type {
+    return NonInt(I, 0);
 }
 
 /// Integer type of `i` excluding its maximum value.
-pub fn NonMax(comptime i: type) type {
-    return NonInt(i, std.math.maxInt(i));
+pub fn NonMax(comptime I: type) type {
+    return NonInt(I, std.math.maxInt(I));
 }
 
 /// Generic integer niche: the value `num` of integer type `i` is reserved as `invalid`.
-fn NonInt(comptime i: type, comptime num: comptime_int) type {
-    if (@typeInfo(i) != .int)
-        @compileError("NonInt requires an integer type, got " ++ @typeName(i));
+fn NonInt(comptime I: type, comptime num: comptime_int) type {
+    if (@typeInfo(I) != .int)
+        @compileError("NonInt requires an integer type, got " ++ @typeName(I));
 
-    return enum(i) {
+    return enum(I) {
         /// Sentinel value meaning no valid value.
         invalid = num,
         _,
 
         /// Returns a value built from the raw integer `val`.
         /// Asserts (in safe build modes) that `val` is not the reserved value `num`.
-        pub fn from(val: i) @This() {
+        pub fn from(val: I) @This() {
             std.debug.assert(val != num);
             return @enumFromInt(val);
         }
 
         /// Returns the raw value of a valid value.
         /// Asserts (in safe build modes) that the value is not `invalid`.
-        pub fn get(self: @This()) i {
+        pub fn get(self: @This()) I {
             std.debug.assert(self != @This().invalid);
             return @intFromEnum(self);
         }
 
         /// Returns the raw value, or `null` if the value is `invalid`.
-        pub fn tryGet(self: @This()) ?i {
+        pub fn tryGet(self: @This()) ?I {
             if (self == @This().invalid) return null;
             return @intFromEnum(self);
         }
