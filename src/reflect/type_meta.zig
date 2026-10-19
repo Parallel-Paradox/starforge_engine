@@ -17,8 +17,10 @@ need_deinit: union(enum) {
     managed: *const fn (self: *anyopaque, ctx: ?*anyopaque) void,
 } = .trivial,
 
-/// Builds the metadata of `T`. Types declaring `fn deinit(self: *T) void` are marked as `managed`;
-/// other types are `trivial` and can set `need_deinit` manually.
+/// Builds the metadata of `T`.
+/// A `pub fn deinit(self: *T) void` marks it `managed`, otherwise `trivial`.
+///
+/// **NOTE**: A non-`pub` `deinit` is silently treated as `trivial` (leak).
 pub fn of(comptime T: type) @This() {
     const Deinit = struct {
         fn call(self: *anyopaque, _: ?*anyopaque) void {
