@@ -8,7 +8,7 @@ const TypeId = root.TypeId;
 id: TypeId = .invalid,
 name: []const u8 = "",
 size: usize = 0,
-alignment: usize = 0,
+alignment: std.mem.Alignment = .@"1",
 /// Indicates whether a type requires a deinit implementation to be called.
 need_deinit: union(enum) {
     /// Data-only types.
@@ -30,7 +30,7 @@ pub fn of(comptime T: type) @This() {
         .id = TypeId.of(T),
         .name = @typeName(T),
         .size = @sizeOf(T),
-        .alignment = @alignOf(T),
+        .alignment = std.mem.Alignment.of(T),
         .need_deinit = if (comptime hasAutoDeinit(T)) .{ .managed = &Deinit.call } else .trivial,
     };
 }
@@ -57,25 +57,17 @@ pub fn eql(self: @This(), other: @This()) bool {
     return self.id.eql(other.id);
 }
 
+/// `alignment` is a `std.mem.Alignment`, so it is always a power of two.
 pub const ValidateError = TypeId.ValidateError || error{
-    /// If alignment is greater than 0, it must be a power of two.
-    AlignNotPowerOfTwo,
-    /// If alignment is greater than 0, it must divide the size evenly.
+    /// The size must be a multiple of the alignment.
     SizeNotDivisibleByAlign,
-    /// If alignment is 0, size must also be 0 (e.g. for void type).
-    SizeNotZeroWithZeroAlign,
 };
 
-/// Validates that the TypeMeta has a valid id and a consistent size and alignment.
+/// Validates that the TypeMeta has a valid id and a size that is a multiple of its alignment.
 pub fn validate(self: @This()) ValidateError!void {
     try self.id.validate();
 
-    if (self.alignment == 0) {
-        if (self.size != 0) return ValidateError.SizeNotZeroWithZeroAlign;
-        return;
-    }
-    if (!std.math.isPowerOfTwo(self.alignment)) return ValidateError.AlignNotPowerOfTwo;
-    if (self.size % self.alignment != 0) return ValidateError.SizeNotDivisibleByAlign;
+    if (self.size % self.alignment.toByteUnits() != 0) return ValidateError.SizeNotDivisibleByAlign;
 }
 
 /// Checks if the TypeMeta is valid according to the validate function.
@@ -95,7 +87,7 @@ test "trivial type has no deinit" {
     try expect(meta.id.eql(TypeId.of(u32)));
     try expectEqualStrings("u32", meta.name);
     try expectEqual(@sizeOf(u32), meta.size);
-    try expectEqual(@alignOf(u32), meta.alignment);
+    try expectEqual(std.mem.Alignment.of(u32), meta.alignment);
     try expect(std.meta.activeTag(meta.need_deinit) == .trivial);
 }
 
@@ -137,17 +129,9 @@ test "default meta is invalid" {
     try expect(!(@This(){}).isValid());
 }
 
-test "inconsistent size and alignment is invalid" {
+test "size not divisible by alignment is invalid" {
     var meta = of(u32);
 
-    meta.alignment = 3;
-    try expectError(ValidateError.AlignNotPowerOfTwo, meta.validate());
-
-    meta.alignment = 4;
     meta.size = 6;
     try expectError(ValidateError.SizeNotDivisibleByAlign, meta.validate());
-
-    meta.alignment = 0;
-    meta.size = 4;
-    try expectError(ValidateError.SizeNotZeroWithZeroAlign, meta.validate());
 }
