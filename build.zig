@@ -60,7 +60,7 @@ pub fn buildTest(b: *std.Build, comptime name: []const u8, mod: *std.Build.Modul
 fn buildExamples(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     mod_starforge: *std.Build.Module,
 ) void {
     inline for ([_]struct {
@@ -92,8 +92,6 @@ fn buildExamples(
         const run_example_cmd = b.addRunArtifact(example);
         run_example_cmd.step.dependOn(&build_example_cmd.step);
         run_step.dependOn(&run_example_cmd.step);
-        if (b.args) |args| {
-            run_example_cmd.addArgs(args);
-        }
+        run_example_cmd.addPassthruArgs();
     }
 }

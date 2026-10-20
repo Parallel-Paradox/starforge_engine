@@ -26,20 +26,20 @@ fn NonInt(comptime I: type, comptime num: comptime_int) type {
         /// Asserts (in safe build modes) that `val` is not the reserved value `num`.
         pub fn from(val: I) @This() {
             std.debug.assert(val != num);
-            return @enumFromInt(val);
+            return @fromBackingInt(@intCast(val));
         }
 
         /// Returns the raw value of a valid value.
         /// Asserts (in safe build modes) that the value is not `invalid`.
         pub fn get(self: @This()) I {
             std.debug.assert(self != @This().invalid);
-            return @intFromEnum(self);
+            return @backingInt(self);
         }
 
         /// Returns the raw value, or `null` if the value is `invalid`.
         pub fn tryGet(self: @This()) ?I {
             if (self == @This().invalid) return null;
-            return @intFromEnum(self);
+            return @backingInt(self);
         }
 
         /// Returns the next valid value, wrapping around and skipping `invalid`.
@@ -47,7 +47,7 @@ fn NonInt(comptime I: type, comptime num: comptime_int) type {
         pub fn next(self: @This()) @This() {
             var val = self.get() +% 1;
             if (val == num) val +%= 1;
-            return @enumFromInt(val);
+            return @fromBackingInt(@intCast(val));
         }
     };
 }
@@ -63,15 +63,15 @@ test "NonInt from" {
 
 test "NonInt with signed and unsigned custom sentinel" {
     const Signed = NonInt(i8, -1);
-    const sv: Signed = @enumFromInt(3);
+    const sv: Signed = @fromBackingInt(@intCast(3));
     try expectEqual(3, sv.get());
     try expectEqual(null, Signed.invalid.tryGet());
 
     const Unsigned = NonInt(u8, 42);
-    const uv: Unsigned = @enumFromInt(3);
+    const uv: Unsigned = @fromBackingInt(@intCast(3));
     try expectEqual(3, uv.get());
     try expectEqual(null, Unsigned.invalid.tryGet());
-    try expectEqual(42, @intFromEnum(Unsigned.invalid));
+    try expectEqual(42, @backingInt(Unsigned.invalid));
 }
 
 test "NonInt next skips the invalid value" {

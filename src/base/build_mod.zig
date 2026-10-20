@@ -6,7 +6,7 @@ pub const MOD_NAME = "base";
 pub fn build(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) struct {
     mod: *std.Build.Module,
     test_step: *std.Build.Step,

@@ -82,8 +82,8 @@ pub const Value = union(enum) {
         return .{ .Array = try ArrayValue.from(allocator, val) };
     }
 
-    fn isConstByteString(comptime ptr: std.builtin.Type.Pointer) bool {
-        if (!ptr.is_const) return false;
+    fn isConstByteString(comptime ptr: std.lang.Type.Pointer) bool {
+        if (!ptr.attrs.@"const") return false;
         if (ptr.size == .slice) return ptr.child == u8;
         if (ptr.size == .one) switch (@typeInfo(ptr.child)) {
             .array => |arr| return arr.child == u8,
@@ -139,8 +139,9 @@ pub const ArrayValue = union(enum) {
     /// passed in by value.
     pub fn from(allocator: Allocator, val: anytype) ConvertError!ArrayValue {
         const T = @TypeOf(val);
-        inline for (@typeInfo(ArrayValue).@"union".fields) |field| {
-            if (T == field.type) return @unionInit(ArrayValue, field.name, val);
+        const info = @typeInfo(ArrayValue).@"union";
+        inline for (info.field_names, info.field_types) |field_name, field_type| {
+            if (T == field_type) return @unionInit(ArrayValue, field_name, val);
         }
 
         if (comptime !isSequence(T) or Value.tagFor(T) != null) return ConvertError.InvalidType;
@@ -169,8 +170,9 @@ pub const ArrayValue = union(enum) {
     }
 
     fn isConvertibleArray(comptime T: type) bool {
-        inline for (@typeInfo(ArrayValue).@"union".fields) |field| {
-            if (T == field.type) return true;
+        const info = @typeInfo(ArrayValue).@"union";
+        inline for (info.field_types) |field_type| {
+            if (T == field_type) return true;
         }
         return isSequence(T) and Value.tagFor(T) == null and Value.tagFor(std.meta.Elem(T)) != null;
     }
@@ -234,17 +236,17 @@ pub fn appendStruct(
     fields: anytype,
 ) (Allocator.Error || FormatError)!void {
     const field_info = switch (@typeInfo(@TypeOf(fields))) {
-        .@"struct" => |info| info.fields,
+        .@"struct" => |info| info,
         else => return FormatError.NotStruct,
     };
-    inline for (field_info) |field| {
-        if (comptime !Value.isConvertible(field.type)) return FormatError.InvalidFieldType;
+    inline for (field_info.field_types) |field_type| {
+        if (comptime !Value.isConvertible(field_type)) return FormatError.InvalidFieldType;
     }
 
-    inline for (field_info) |field| {
-        var value = try toValue(allocator, field.type, @field(fields, field.name));
+    inline for (field_info.field_names, field_info.field_types) |field_name, field_type| {
+        var value = try toValue(allocator, field_type, @field(fields, field_name));
         errdefer value.deinit(allocator);
-        try list.append(allocator, .{ .key = field.name, .value = value });
+        try list.append(allocator, .{ .key = field_name, .value = value });
     }
 }
 
@@ -428,7 +430,8 @@ test "appendStruct frees a moved owned value when append fails" {
     var list: std.ArrayList(@This()) = .empty;
     defer list.deinit(allocator);
 
-    const owned = try String.fromSlice(std.testing.allocator, "a" ** 64);
+    const filler: [64]u8 = @splat('a');
+    const owned = try String.fromSlice(std.testing.allocator, &filler);
     try expectError(error.OutOfMemory, appendStruct(allocator, &list, .{ .owned = owned }));
 }
 

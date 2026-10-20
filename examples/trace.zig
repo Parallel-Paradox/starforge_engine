@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
     inline for (std.meta.tags(trace.Event.Level)) |level| {
         var event = query.initEvent(.{ .name = @tagName(level), .level = level });
         defer event.deinit();
-        try event.addAttrs(.{ .level_value = @as(u64, @intFromEnum(level)) });
+        try event.addAttrs(.{ .level_value = @as(u64, @backingInt(level)) });
         event.emit();
     }
 

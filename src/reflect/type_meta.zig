@@ -49,8 +49,8 @@ fn hasAutoDeinit(comptime T: type) bool {
         .@"fn" => |f| f,
         else => return false,
     };
-    return fn_info.params.len == 1 and
-        fn_info.params[0].type == *T and
+    return fn_info.param_types.len == 1 and
+        fn_info.param_types[0] == *T and
         fn_info.return_type == void;
 }
 
@@ -97,7 +97,7 @@ test "type with deinit is managed" {
     const Probe = struct {
         calls: *usize,
 
-        fn deinit(self: *@This()) void {
+        pub fn deinit(self: *@This()) void {
             self.calls.* += 1;
         }
     };
@@ -113,13 +113,23 @@ test "type with deinit is managed" {
 
 test "deinit with another signature is not auto managed" {
     const Needy = struct {
-        fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
             _ = self;
             _ = allocator;
         }
     };
 
     try expect(std.meta.activeTag(of(Needy).need_deinit) == .trivial);
+}
+
+test "non-pub deinit is not auto managed" {
+    const Hidden = struct {
+        fn deinit(self: *@This()) void {
+            _ = self;
+        }
+    };
+
+    try expect(std.meta.activeTag(of(Hidden).need_deinit) == .trivial);
 }
 
 test "meta of a type is valid" {
