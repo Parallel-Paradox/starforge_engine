@@ -5,7 +5,7 @@ const trace = @import("src/trace/build_mod.zig");
 const reflect = @import("src/reflect/build_mod.zig");
 const ecs = @import("src/ecs/build_mod.zig");
 
-pub const MOD_NAME = "starforge";
+pub const mod_name = "starforge";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -13,24 +13,24 @@ pub fn build(b: *std.Build) void {
 
     const build_base = base.build(b, target, optimize);
     const build_trace = trace.build(b, target, optimize, &.{
-        .{ .name = base.MOD_NAME, .module = build_base.mod },
+        .{ .name = base.mod_name, .module = build_base.mod },
     });
     const build_reflect = reflect.build(b, target, optimize, &.{
-        .{ .name = base.MOD_NAME, .module = build_base.mod },
+        .{ .name = base.mod_name, .module = build_base.mod },
     });
     const build_ecs = ecs.build(b, target, optimize, &.{
-        .{ .name = base.MOD_NAME, .module = build_base.mod },
-        .{ .name = trace.MOD_NAME, .module = build_trace.mod },
-        .{ .name = reflect.MOD_NAME, .module = build_reflect.mod },
+        .{ .name = base.mod_name, .module = build_base.mod },
+        .{ .name = trace.mod_name, .module = build_trace.mod },
+        .{ .name = reflect.mod_name, .module = build_reflect.mod },
     });
 
-    const mod_starforge = b.addModule(MOD_NAME, .{
+    const mod_starforge = b.addModule(mod_name, .{
         .root_source_file = b.path("src/mod.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = base.MOD_NAME, .module = build_base.mod },
-            .{ .name = trace.MOD_NAME, .module = build_trace.mod },
+            .{ .name = base.mod_name, .module = build_base.mod },
+            .{ .name = trace.mod_name, .module = build_trace.mod },
         },
     });
 

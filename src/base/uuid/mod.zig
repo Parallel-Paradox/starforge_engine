@@ -7,7 +7,7 @@ pub const Uuid = packed struct {
     // Zig packed structs lay out fields from the least significant bit, so fields are declared
     // in reverse of the RFC 9562 bit order to keep `@bitCast` to `u128` matching the RFC layout.
     sec_c: u62,
-    variant: u2 = VARIANT,
+    variant: u2 = variant_rfc9562,
     sec_b: u12,
     ver: Version,
     sec_a: u48,
@@ -16,7 +16,7 @@ pub const Uuid = packed struct {
 
     /// The variant field determines the layout of the UUID.
     /// https://www.rfc-editor.org/info/rfc9562/#variant_field
-    pub const VARIANT: u2 = 0b10;
+    pub const variant_rfc9562: u2 = 0b10;
 
     pub const Version = enum(u4) {
         v4 = 0b0100,

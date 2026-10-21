@@ -41,9 +41,8 @@ pub const Status = enum(i8) {
 
     pub fn toStr(self: @This()) []const u8 {
         return switch (self) {
-            .unset => "UNSET",
-            .ok => "OK",
-            .err => "ERROR",
+            .err => "error",
+            else => @tagName(self),
         };
     }
 };
@@ -61,14 +60,8 @@ pub const Kind = enum(u8) {
     /// Processes an async message. May start long after the message was produced.
     consumer = 4,
 
-    pub fn toString(self: @This()) []const u8 {
-        return switch (self) {
-            .internal => "INTERNAL",
-            .server => "SERVER",
-            .client => "CLIENT",
-            .producer => "PRODUCER",
-            .consumer => "CONSUMER",
-        };
+    pub fn toStr(self: @This()) []const u8 {
+        return @tagName(self);
     }
 };
 
@@ -168,5 +161,5 @@ test "link records the target and its attributes" {
     try span.linkTo(span.trace.id, span.id, .{ .k = @as(i64, 7) });
     try std.testing.expectEqual(@as(usize, 1), span.links.items.len);
     try std.testing.expectEqual(span.id, span.links.items[0].span_id);
-    try std.testing.expectEqual(@as(i64, 7), span.links.items[0].attrs.items[0].value.Int);
+    try std.testing.expectEqual(@as(i64, 7), span.links.items[0].attrs.items[0].value.int);
 }

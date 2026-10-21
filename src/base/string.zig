@@ -1,13 +1,13 @@
 //! A string type that uses small string optimization (SSO) for short strings.
-//! The maximum length of a string that can be stored in SSO is `MAX_SSO_LEN`.
+//! The maximum length of a string that can be stored in SSO is `max_sso_len`.
 //! At non-SSO, the max capacity is 2^(size-8), 2^24=16MB, 2^56=72PB.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-pub const MAX_SSO_LEN = @sizeOf(usize) * 3 - 1;
+pub const max_sso_len = @sizeOf(usize) * 3 - 1;
 
-/// SSO: |MAX_SSO_LEN bytes|len:7 bits|is_sso:1 bit|
+/// SSO: |max_sso_len bytes|len:7 bits|is_sso:1 bit|
 /// Non-SSO: |ptr:usize|len:usize|capacity:u(size-8)|reserved: 7 bits|is_sso:1 bit|
 _buf: [3 * @sizeOf(usize)]u8,
 
@@ -18,7 +18,7 @@ const SsoView = packed struct(u8) {
 
 /// Check if the string is using small string optimization (SSO).
 pub fn isSso(self: @This()) bool {
-    const view: SsoView = @bitCast(self._buf[MAX_SSO_LEN]);
+    const view: SsoView = @bitCast(self._buf[max_sso_len]);
     return view.is_sso;
 }
 
@@ -44,7 +44,7 @@ pub fn sliceMut(self: *@This()) []u8 {
 
 pub fn len(self: @This()) usize {
     if (self.isSso()) {
-        const view: SsoView = @bitCast(self._buf[MAX_SSO_LEN]);
+        const view: SsoView = @bitCast(self._buf[max_sso_len]);
         return @intCast(view.sso_len);
     }
     return std.mem.readInt(usize, self._buf[@sizeOf(usize)..][0..@sizeOf(usize)], .little);
@@ -52,7 +52,7 @@ pub fn len(self: @This()) usize {
 
 pub fn capacity(self: @This()) usize {
     if (self.isSso()) {
-        return MAX_SSO_LEN;
+        return max_sso_len;
     }
     const CapInt = @Int(.unsigned, @bitSizeOf(usize) - 8);
     const view = self._buf[2 * @sizeOf(usize) ..][0..(@sizeOf(usize) - 1)];
@@ -64,7 +64,7 @@ pub fn capacity(self: @This()) usize {
 pub fn empty() @This() {
     var s: @This() = undefined;
     const view: SsoView = .{ .sso_len = 0, .is_sso = true };
-    s._buf[MAX_SSO_LEN] = @bitCast(view);
+    s._buf[max_sso_len] = @bitCast(view);
     return s;
 }
 
@@ -74,14 +74,14 @@ pub fn isEmpty(self: @This()) bool {
 }
 
 /// Create a string from a slice of bytes.
-/// If the length of the slice is LE `MAX_SSO_LEN`, the string will use SSO.
+/// If the length of the slice is LE `max_sso_len`, the string will use SSO.
 /// Otherwise, the string will allocate memory on the heap using the provided allocator.
 pub fn fromSlice(allocator: Allocator, str: []const u8) Allocator.Error!@This() {
-    if (str.len <= MAX_SSO_LEN) {
+    if (str.len <= max_sso_len) {
         var s: @This() = undefined;
         @memcpy(s._buf[0..str.len], str);
         const view: SsoView = .{ .sso_len = @intCast(str.len), .is_sso = true };
-        s._buf[MAX_SSO_LEN] = @bitCast(view);
+        s._buf[max_sso_len] = @bitCast(view);
         return s;
     } else {
         var s: @This() = undefined;
@@ -98,7 +98,7 @@ pub fn fromSlice(allocator: Allocator, str: []const u8) Allocator.Error!@This() 
         std.mem.writeInt(CapInt, cap_buf, cap, .little);
 
         const view: SsoView = .{ .sso_len = 0, .is_sso = false };
-        s._buf[MAX_SSO_LEN] = @bitCast(view);
+        s._buf[max_sso_len] = @bitCast(view);
         return s;
     }
 }
@@ -130,7 +130,7 @@ test "string from slice using SSO" {
     try expect(!s.isEmpty());
     try expectEqual(str.len, s.len());
     try expectEqualStrings(str, s.slice());
-    try expectEqual(@This().MAX_SSO_LEN, s.capacity());
+    try expectEqual(@This().max_sso_len, s.capacity());
     try expect(s.isSso());
 }
 

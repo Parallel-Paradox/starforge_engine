@@ -19,11 +19,11 @@ level_mask: LevelMask,
 pub const LevelMask = packed struct(u8) {
     trace: bool = false,
     debug: bool = switch (builtin.mode) {
-        .Debug => true,
+        .debug => true,
         else => false,
     },
     info: bool = switch (builtin.mode) {
-        .Debug, .ReleaseSafe => true,
+        .debug, .safe => true,
         else => false,
     },
     warn: bool = true,
@@ -61,7 +61,7 @@ fn this(ptr: *anyopaque) *@This() {
     return @ptrCast(@alignCast(ptr));
 }
 
-/// ┌ YYYY-MM-DD HH:MM:SS trace_id-span_id < parent_id KIND name
+/// ┌ YYYY-MM-DD HH:MM:SS trace_id-span_id < parent_id kind name
 fn spanStarted(_: *anyopaque, span: Span) void {
     const io = span.trace.tracer.getIo();
 
@@ -80,11 +80,11 @@ fn spanStarted(_: *anyopaque, span: Span) void {
     writeSpanPrefix(writer, span, begin);
     terminal.setColor(.reset) catch {};
 
-    // KIND name
-    writer.print(" {s} {s}\n", .{ span.kind.toString(), span.name }) catch {};
+    // kind name
+    writer.print(" {s} {s}\n", .{ span.kind.toStr(), span.name }) catch {};
 }
 
-/// └ YYYY-MM-DD HH:MM:SS trace_id-span_id < parent_id STATUS name duration
+/// └ YYYY-MM-DD HH:MM:SS trace_id-span_id < parent_id status name duration
 ///   attributes
 ///   -> trace_id span_id attributes
 fn spanEmitted(_: *anyopaque, span: Span) void {
@@ -105,7 +105,7 @@ fn spanEmitted(_: *anyopaque, span: Span) void {
     writeSpanPrefix(writer, span, begin);
     terminal.setColor(.reset) catch {};
 
-    // STATUS name duration
+    // status name duration
     writer.writeByte(' ') catch {};
     terminal.setColor(switch (span.status) {
         .unset => .dim,
@@ -165,7 +165,7 @@ fn spanDurationMs(span: Span) i96 {
     return @divTrunc(begin.durationTo(end).toNanoseconds(), std.time.ns_per_ms);
 }
 
-/// HH:MM:SS trace_id-span_id ● LEVEL name attributes
+/// HH:MM:SS trace_id-span_id ● level name attributes
 fn eventEmitted(ptr: *anyopaque, event: Event) void {
     const self = this(ptr);
 
@@ -190,7 +190,7 @@ fn eventEmitted(ptr: *anyopaque, event: Event) void {
     writer.print("{s} {s}", .{ epoch_time, join_id }) catch {};
     terminal.setColor(.reset) catch {};
 
-    // LEVEL
+    // level
     terminal.setColor(switch (event.level) {
         .trace => .dim,
         .debug => .reset,

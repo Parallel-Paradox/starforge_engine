@@ -38,12 +38,8 @@ pub const Level = enum(u8) {
 
     pub fn toStr(self: @This()) []const u8 {
         return switch (self) {
-            .trace => "TRACE",
-            .debug => "DEBUG",
-            .info => "INFO",
-            .warn => "WARN",
-            .err => "ERROR",
-            .fatal => "FATAL",
+            .err => "error",
+            else => @tagName(self),
         };
     }
 };

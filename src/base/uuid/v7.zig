@@ -20,7 +20,7 @@ const Uuid = root.Uuid;
 pub const V7 = packed struct {
     // Declared in reverse RFC bit order, see `Uuid`.
     rand_b: u62,
-    variant: u2 = Uuid.VARIANT,
+    variant: u2 = Uuid.variant_rfc9562,
     rand_a: u12,
     ver: Uuid.Version = .v7,
     unix_ts_ms: u48,

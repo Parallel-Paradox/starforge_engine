@@ -15,18 +15,18 @@ pub fn deinit(self: *@This(), allocator: Allocator) void {
 }
 
 pub const Value = union(enum) {
-    Str: []const u8,
-    String: String,
-    Int: i64,
-    Uint: u64,
-    Float: f64,
-    Bool: bool,
-    Array: ArrayValue,
+    str: []const u8,
+    string: String,
+    int: i64,
+    uint: u64,
+    float: f64,
+    bool: bool,
+    array: ArrayValue,
 
     pub fn deinit(self: *@This(), allocator: Allocator) void {
         switch (self.*) {
-            .String => |*str| str.deinit(allocator),
-            .Array => |*array| array.deinit(allocator),
+            .string => |*str| str.deinit(allocator),
+            .array => |*array| array.deinit(allocator),
             else => {},
         }
     }
@@ -34,19 +34,19 @@ pub const Value = union(enum) {
     pub const ConvertError = error{InvalidType};
 
     /// Returns the variant that a value of type `T` converts to, or `null` if unsupported.
-    /// Const byte slices map to `Str`, and `String` maps to `String`.
+    /// Const byte slices map to `str`, and `String` maps to `string`.
     pub fn tagFor(comptime T: type) ?std.meta.FieldEnum(Value) {
-        if (T == String) return .String;
+        if (T == String) return .string;
         return switch (@typeInfo(T)) {
-            .bool => .Bool,
+            .bool => .bool,
             .int => |int| if (int.bits > 64) null else switch (int.signedness) {
-                .signed => .Int,
-                .unsigned => .Uint,
+                .signed => .int,
+                .unsigned => .uint,
             },
-            .comptime_int => .Int,
-            .float => |float| if (float.bits > 64) null else .Float,
-            .comptime_float => .Float,
-            .pointer => |ptr| if (isConstByteString(ptr)) .Str else null,
+            .comptime_int => .int,
+            .float => |float| if (float.bits > 64) null else .float,
+            .comptime_float => .float,
+            .pointer => |ptr| if (isConstByteString(ptr)) .str else null,
             else => null,
         };
     }
@@ -54,17 +54,17 @@ pub const Value = union(enum) {
     /// The payload element type of the array variant `tag`.
     pub fn ElemOf(comptime tag: std.meta.FieldEnum(Value)) type {
         return switch (tag) {
-            .Str => []const u8,
-            .String => String,
-            .Int => i64,
-            .Uint => u64,
-            .Float => f64,
-            .Bool => bool,
+            .str => []const u8,
+            .string => String,
+            .int => i64,
+            .uint => u64,
+            .float => f64,
+            .bool => bool,
             else => unreachable,
         };
     }
 
-    /// Converts a scalar or string `val` into a `Value`. Const byte slices become `Str` (borrowed).
+    /// Converts a scalar or string `val` into a `Value`. Const byte slices become `str` (borrowed).
     /// Arrays are not handled here; use `ArrayValue.from` for them.
     pub fn from(val: anytype) ConvertError!Value {
         if (comptime tagFor(@TypeOf(val)) == null) return ConvertError.InvalidType;
@@ -77,9 +77,9 @@ pub const Value = union(enum) {
         return tagFor(T) != null or ArrayValue.isConvertibleArray(T);
     }
 
-    /// Wraps the result of `ArrayValue.from` in the `Array` variant.
+    /// Wraps the result of `ArrayValue.from` in the `array` variant.
     pub fn fromArray(allocator: Allocator, val: anytype) ArrayValue.ConvertError!Value {
-        return .{ .Array = try ArrayValue.from(allocator, val) };
+        return .{ .array = try ArrayValue.from(allocator, val) };
     }
 
     fn isConstByteString(comptime ptr: std.lang.Type.Pointer) bool {
@@ -94,18 +94,18 @@ pub const Value = union(enum) {
 
     pub fn writeTo(self: @This(), writer: *Writer) Writer.Error!void {
         switch (self) {
-            .Str => |str| {
+            .str => |str| {
                 try writer.writeAll("&\"");
                 try writeEscaped(writer, str);
                 try writer.writeByte('"');
             },
-            .String => |str| {
+            .string => |str| {
                 try writer.writeByte('"');
                 try writeEscaped(writer, str.slice());
                 try writer.writeByte('"');
             },
-            .Bool => |b| try writer.writeAll(if (b) "true" else "false"),
-            .Array => |array| try array.writeTo(writer),
+            .bool => |b| try writer.writeAll(if (b) "true" else "false"),
+            .array => |array| try array.writeTo(writer),
             inline else => |val| try writer.print("{d}", .{val}),
         }
     }
@@ -124,12 +124,12 @@ fn writeEscaped(writer: *Writer, str: []const u8) Writer.Error!void {
 
 /// The element of an array must be the same type, and cannot be another array.
 pub const ArrayValue = union(enum) {
-    Str: std.ArrayList([]const u8),
-    String: std.ArrayList(String),
-    Int: std.ArrayList(i64),
-    Uint: std.ArrayList(u64),
-    Float: std.ArrayList(f64),
-    Bool: std.ArrayList(bool),
+    str: std.ArrayList([]const u8),
+    string: std.ArrayList(String),
+    int: std.ArrayList(i64),
+    uint: std.ArrayList(u64),
+    float: std.ArrayList(f64),
+    bool: std.ArrayList(bool),
 
     pub const ConvertError = Value.ConvertError || Allocator.Error;
 
@@ -151,7 +151,7 @@ pub const ArrayValue = union(enum) {
 
         var list = try std.ArrayList(Value.ElemOf(tag)).initCapacity(allocator, val.len);
         errdefer {
-            if (comptime tag == .String) for (list.items) |*str| str.deinit(allocator);
+            if (comptime tag == .string) for (list.items) |*str| str.deinit(allocator);
             list.deinit(allocator);
         }
         for (val) |item| list.appendAssumeCapacity(try convertElem(tag, allocator, item));
@@ -164,7 +164,7 @@ pub const ArrayValue = union(enum) {
         item: anytype,
     ) Allocator.Error!Value.ElemOf(tag) {
         return switch (tag) {
-            .String => try String.fromSlice(allocator, item.slice()),
+            .string => try String.fromSlice(allocator, item.slice()),
             else => @as(Value.ElemOf(tag), item),
         };
     }
@@ -188,7 +188,7 @@ pub const ArrayValue = union(enum) {
 
     pub fn deinit(self: *@This(), allocator: Allocator) void {
         switch (self.*) {
-            .String => |*string_list| {
+            .string => |*string_list| {
                 for (string_list.items) |*str| str.deinit(allocator);
                 string_list.deinit(allocator);
             },
@@ -198,12 +198,12 @@ pub const ArrayValue = union(enum) {
 
     pub fn writeTo(self: @This(), writer: *Writer) Writer.Error!void {
         switch (self) {
-            .Str => |list| try writeList(writer, list.items, .Str),
-            .String => |list| try writeList(writer, list.items, .String),
-            .Int => |list| try writeList(writer, list.items, .Int),
-            .Uint => |list| try writeList(writer, list.items, .Uint),
-            .Float => |list| try writeList(writer, list.items, .Float),
-            .Bool => |list| try writeList(writer, list.items, .Bool),
+            .str => |list| try writeList(writer, list.items, .str),
+            .string => |list| try writeList(writer, list.items, .string),
+            .int => |list| try writeList(writer, list.items, .int),
+            .uint => |list| try writeList(writer, list.items, .uint),
+            .float => |list| try writeList(writer, list.items, .float),
+            .bool => |list| try writeList(writer, list.items, .bool),
         }
     }
 
@@ -275,16 +275,16 @@ fn expectValueWrites(value: Value, expected: []const u8) !void {
 }
 
 test "value writes scalar values" {
-    try expectValueWrites(.{ .Str = "hello" }, "&\"hello\"");
-    try expectValueWrites(.{ .Bool = true }, "true");
-    try expectValueWrites(.{ .Bool = false }, "false");
-    try expectValueWrites(.{ .Int = -42 }, "-42");
-    try expectValueWrites(.{ .Uint = 42 }, "42");
-    try expectValueWrites(.{ .Float = 3.5 }, "3.5");
+    try expectValueWrites(.{ .str = "hello" }, "&\"hello\"");
+    try expectValueWrites(.{ .bool = true }, "true");
+    try expectValueWrites(.{ .bool = false }, "false");
+    try expectValueWrites(.{ .int = -42 }, "-42");
+    try expectValueWrites(.{ .uint = 42 }, "42");
+    try expectValueWrites(.{ .float = 3.5 }, "3.5");
 }
 
 test "value writes an owned string" {
-    var value = Value{ .String = try String.fromSlice(std.testing.allocator, "owned string") };
+    var value = Value{ .string = try String.fromSlice(std.testing.allocator, "owned string") };
     defer value.deinit(std.testing.allocator);
 
     try expectValueWrites(value, "\"owned string\"");
@@ -295,52 +295,52 @@ test "value writes arrays" {
 
     var int_list = try std.ArrayList(i64).initCapacity(allocator, 2);
     try int_list.appendSlice(allocator, &[_]i64{ 1, -2 });
-    var int_value = Value{ .Array = .{ .Int = int_list } };
+    var int_value = Value{ .array = .{ .int = int_list } };
     defer int_value.deinit(allocator);
     try expectValueWrites(int_value, "[1, -2]");
 
     var uint_list = try std.ArrayList(u64).initCapacity(allocator, 2);
     try uint_list.appendSlice(allocator, &[_]u64{ 1, 42 });
-    var uint_value = Value{ .Array = .{ .Uint = uint_list } };
+    var uint_value = Value{ .array = .{ .uint = uint_list } };
     defer uint_value.deinit(allocator);
     try expectValueWrites(uint_value, "[1, 42]");
 
     var float_list = try std.ArrayList(f64).initCapacity(allocator, 2);
     try float_list.appendSlice(allocator, &[_]f64{ 1.5, -2.0 });
-    var float_value = Value{ .Array = .{ .Float = float_list } };
+    var float_value = Value{ .array = .{ .float = float_list } };
     defer float_value.deinit(allocator);
     try expectValueWrites(float_value, "[1.5, -2]");
 
     var bool_list = try std.ArrayList(bool).initCapacity(allocator, 2);
     try bool_list.appendSlice(allocator, &[_]bool{ true, false });
-    var bool_value = Value{ .Array = .{ .Bool = bool_list } };
+    var bool_value = Value{ .array = .{ .bool = bool_list } };
     defer bool_value.deinit(allocator);
     try expectValueWrites(bool_value, "[true, false]");
 
     var str_list = try std.ArrayList([]const u8).initCapacity(allocator, 2);
     try str_list.appendSlice(allocator, &[_][]const u8{ "first", "second" });
-    var string_value = Value{ .Array = .{ .Str = str_list } };
+    var string_value = Value{ .array = .{ .str = str_list } };
     defer string_value.deinit(allocator);
     try expectValueWrites(string_value, "[&\"first\", &\"second\"]");
 
     var owned_list = try std.ArrayList(String).initCapacity(allocator, 2);
     try owned_list.append(allocator, try String.fromSlice(allocator, "a,b"));
     try owned_list.append(allocator, try String.fromSlice(allocator, "c"));
-    var owned_value = Value{ .Array = .{ .String = owned_list } };
+    var owned_value = Value{ .array = .{ .string = owned_list } };
     defer owned_value.deinit(allocator);
     try expectValueWrites(owned_value, "[\"a,b\", \"c\"]");
 
     const empty_list = try std.ArrayList(i64).initCapacity(allocator, 0);
-    var empty_value = Value{ .Array = .{ .Int = empty_list } };
+    var empty_value = Value{ .array = .{ .int = empty_list } };
     defer empty_value.deinit(allocator);
     try expectValueWrites(empty_value, "[]");
 }
 
 test "value escapes quotes and backslashes" {
-    try expectValueWrites(.{ .Str = "a,b[c]d\\e" }, "&\"a,b[c]d\\\\e\"");
-    try expectValueWrites(.{ .Str = "say \"hi\"" }, "&\"say \\\"hi\\\"\"");
+    try expectValueWrites(.{ .str = "a,b[c]d\\e" }, "&\"a,b[c]d\\\\e\"");
+    try expectValueWrites(.{ .str = "say \"hi\"" }, "&\"say \\\"hi\\\"\"");
 
-    var owned = Value{ .String = try String.fromSlice(std.testing.allocator, "x,\"y\"") };
+    var owned = Value{ .string = try String.fromSlice(std.testing.allocator, "x,\"y\"") };
     defer owned.deinit(std.testing.allocator);
     try expectValueWrites(owned, "\"x,\\\"y\\\"\"");
 }
@@ -348,7 +348,7 @@ test "value escapes quotes and backslashes" {
 test "attribute deinit frees an owned value" {
     var attribute = @This(){
         .key = "greeting",
-        .value = .{ .String = try String.fromSlice(std.testing.allocator, "hello") },
+        .value = .{ .string = try String.fromSlice(std.testing.allocator, "hello") },
     };
     attribute.deinit(std.testing.allocator);
 }
@@ -357,11 +357,11 @@ test "from converts supported values into variants" {
     const allocator = std.testing.allocator;
 
     const str_value = try Value.from("hi");
-    try expectEqualStrings("hi", str_value.Str);
+    try expectEqualStrings("hi", str_value.str);
     const bool_value = try Value.from(true);
-    try expectEqual(true, bool_value.Bool);
+    try expectEqual(true, bool_value.bool);
     const uint_value = try Value.from(@as(u64, 7));
-    try expectEqual(@as(u64, 7), uint_value.Uint);
+    try expectEqual(@as(u64, 7), uint_value.uint);
     try expectError(error.InvalidType, Value.from(@as(?i32, null)));
 
     var list = try Value.fromArray(allocator, &[_]i64{ 1, -2 });
@@ -371,28 +371,28 @@ test "from converts supported values into variants" {
 
 test "from converts every supported scalar" {
     const i8_value = try Value.from(@as(i8, -3));
-    try expectEqual(@as(i64, -3), i8_value.Int);
+    try expectEqual(@as(i64, -3), i8_value.int);
 
     const u8_value = try Value.from(@as(u8, 255));
-    try expectEqual(@as(u64, 255), u8_value.Uint);
+    try expectEqual(@as(u64, 255), u8_value.uint);
 
     const u64_value = try Value.from(@as(u64, std.math.maxInt(u64)));
-    try expectEqual(@as(u64, std.math.maxInt(u64)), u64_value.Uint);
+    try expectEqual(@as(u64, std.math.maxInt(u64)), u64_value.uint);
 
     const comptime_value = try Value.from(-5);
-    try expectEqual(@as(i64, -5), comptime_value.Int);
+    try expectEqual(@as(i64, -5), comptime_value.int);
 
     const f32_value = try Value.from(@as(f32, 2.5));
-    try expectEqual(@as(f64, 2.5), f32_value.Float);
+    try expectEqual(@as(f64, 2.5), f32_value.float);
 
     const float_value = try Value.from(0.25);
-    try expectEqual(@as(f64, 0.25), float_value.Float);
+    try expectEqual(@as(f64, 0.25), float_value.float);
 
     const bool_value = try Value.from(false);
-    try expectEqual(false, bool_value.Bool);
+    try expectEqual(false, bool_value.bool);
 
     const str_value = try Value.from(@as([]const u8, "x"));
-    try expectEqualStrings("x", str_value.Str);
+    try expectEqualStrings("x", str_value.str);
 }
 
 test "appendStruct appends each struct field as an attribute" {
@@ -418,9 +418,9 @@ test "appendStruct appends each struct field as an attribute" {
 
     try expectEqual(@as(usize, 6), list.items.len);
     try expectEqualStrings("x", list.items[0].key);
-    try expectEqual(@as(i64, 1), list.items[0].value.Int);
-    try expectEqualStrings("owned", list.items[4].value.String.slice());
-    try expectEqual(@as(u64, 3), list.items[5].value.Array.Uint.items[0]);
+    try expectEqual(@as(i64, 1), list.items[0].value.int);
+    try expectEqualStrings("owned", list.items[4].value.string.slice());
+    try expectEqual(@as(u64, 3), list.items[5].value.array.uint.items[0]);
 }
 
 test "appendStruct frees a moved owned value when append fails" {
@@ -460,7 +460,7 @@ test "appendStruct builds attributes for event and link lists" {
     var link_attrs: std.ArrayList(@This()) = .empty;
     defer link_attrs.deinit(allocator);
     try appendStruct(allocator, &link_attrs, .{ .x = @as(i64, -1) });
-    try expectEqual(@as(i64, -1), link_attrs.items[0].value.Int);
+    try expectEqual(@as(i64, -1), link_attrs.items[0].value.int);
 }
 
 test "from takes ownership of a String" {

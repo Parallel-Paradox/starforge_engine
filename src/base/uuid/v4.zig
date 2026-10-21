@@ -12,7 +12,7 @@ const Uuid = root.Uuid;
 pub const V4 = packed struct {
     // Declared in reverse RFC bit order, see `Uuid`.
     rand_c: u62,
-    variant: u2 = Uuid.VARIANT,
+    variant: u2 = Uuid.variant_rfc9562,
     rand_b: u12,
     ver: Uuid.Version = .v4,
     rand_a: u48,
@@ -39,7 +39,7 @@ pub const V4 = packed struct {
         const val = rand.int(u128);
         var rv: @This() = @bitCast(val);
         rv.ver = Uuid.Version.v4;
-        rv.variant = Uuid.VARIANT;
+        rv.variant = Uuid.variant_rfc9562;
         return rv;
     }
 
@@ -102,7 +102,7 @@ test "type transfer consistency" {
 
     var raw_uuid: V4 = @bitCast(raw);
     raw_uuid.ver = Uuid.Version.v4;
-    raw_uuid.variant = Uuid.VARIANT;
+    raw_uuid.variant = Uuid.variant_rfc9562;
 
     var mock = random.MockSource{
         .buffers = &.{&raw_bytes},
