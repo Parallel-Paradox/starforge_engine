@@ -7,7 +7,7 @@ const Io = std.Io;
 const Timestamp = std.Io.Timestamp;
 
 const root = @import("root.zig");
-const base = root.base;
+const base = root.super.base;
 const Trace = root.Trace;
 const Event = root.Event;
 const Attribute = root.Attribute;

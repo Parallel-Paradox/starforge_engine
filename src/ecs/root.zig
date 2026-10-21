@@ -1,6 +1,4 @@
-pub const base = @import("base");
-pub const trace = @import("trace");
-pub const reflect = @import("reflect");
+pub const super = @import("../root.zig");
 
 pub const ComponentId = @import("Id.zig");
 pub const ComponentRegistry = @import("component/registry.zig");

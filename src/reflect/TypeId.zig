@@ -3,7 +3,7 @@
 const std = @import("std");
 
 const root = @import("root.zig");
-const NonZero = root.base.niche.NonZero;
+const NonZero = root.super.base.niche.NonZero;
 
 val: NonZero(usize) = .invalid,
 

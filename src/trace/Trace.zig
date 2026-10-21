@@ -3,7 +3,7 @@
 const std = @import("std");
 
 const root = @import("root.zig");
-const base = root.base;
+const base = root.super.base;
 const Tracer = root.Tracer;
 const Span = root.Span;
 

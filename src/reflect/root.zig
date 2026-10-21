@@ -1,4 +1,4 @@
-pub const base = @import("base");
+pub const super = @import("../root.zig");
 
 pub const Parcel = @import("Parcel.zig");
 pub const TypeId = @import("TypeId.zig");

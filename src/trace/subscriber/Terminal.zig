@@ -11,7 +11,7 @@ const Event = root.Event;
 const Attribute = root.Attribute;
 const Subscriber = root.Subscriber;
 
-const base = root.base;
+const base = root.super.base;
 const EpochTime = base.EpochTime;
 
 level_mask: LevelMask,

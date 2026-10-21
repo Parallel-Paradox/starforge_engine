@@ -1,60 +1,23 @@
 const std = @import("std");
 
-const base = @import("src/base/build_mod.zig");
-const trace = @import("src/trace/build_mod.zig");
-const reflect = @import("src/reflect/build_mod.zig");
-const ecs = @import("src/ecs/build_mod.zig");
-
 pub const mod_name = "starforge";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const build_base = base.build(b, target, optimize);
-    const build_trace = trace.build(b, target, optimize, &.{
-        .{ .name = base.mod_name, .module = build_base.mod },
-    });
-    const build_reflect = reflect.build(b, target, optimize, &.{
-        .{ .name = base.mod_name, .module = build_base.mod },
-    });
-    const build_ecs = ecs.build(b, target, optimize, &.{
-        .{ .name = base.mod_name, .module = build_base.mod },
-        .{ .name = trace.mod_name, .module = build_trace.mod },
-        .{ .name = reflect.mod_name, .module = build_reflect.mod },
-    });
-
-    const mod_starforge = b.addModule(mod_name, .{
+    const mod = b.addModule(mod_name, .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{
-            .{ .name = base.mod_name, .module = build_base.mod },
-            .{ .name = trace.mod_name, .module = build_trace.mod },
-        },
     });
 
+    const test_suites = b.addTest(.{ .name = "test", .root_module = mod });
     const test_step = b.step("test", "Run all test suites");
-    test_step.dependOn(build_base.test_step);
-    test_step.dependOn(build_trace.test_step);
-    test_step.dependOn(build_reflect.test_step);
-    test_step.dependOn(build_ecs.test_step);
+    const test_cmd = b.addRunArtifact(test_suites);
+    test_step.dependOn(&test_cmd.step);
 
-    buildExamples(b, target, optimize, mod_starforge);
-}
-
-pub fn buildTest(b: *std.Build, comptime name: []const u8, mod: *std.Build.Module) *std.Build.Step {
-    const prefix = "test-" ++ name;
-    const mod_tests = b.addTest(.{
-        .name = prefix,
-        .root_module = mod,
-    });
-
-    const test_step_desc = "Run tests of " ++ name;
-    const test_step = b.step(prefix, test_step_desc);
-    const test_mod_cmd = b.addRunArtifact(mod_tests);
-    test_step.dependOn(&test_mod_cmd.step);
-    return &test_mod_cmd.step;
+    buildExamples(b, target, optimize, mod);
 }
 
 fn buildExamples(

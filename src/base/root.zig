@@ -3,7 +3,7 @@ pub const niche = @import("niche.zig");
 
 pub const AlignedBuffer = @import("AlignedBuffer.zig");
 pub const EpochTime = @import("EpochTime.zig");
-pub const Uuid = @import("uuid/root.zig").Uuid;
+pub const Uuid = @import("uuid/uuid.zig").Uuid;
 pub const String = @import("String.zig");
 
 test {

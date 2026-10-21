@@ -5,7 +5,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const root = @import("../root.zig");
-const base = root.base;
+const base = root.super.base;
 const Tracer = root.Tracer;
 const Trace = root.Trace;
 const Span = root.Span;

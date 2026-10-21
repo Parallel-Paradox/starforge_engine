@@ -1,4 +1,4 @@
-pub const base = @import("base");
+pub const super = @import("../root.zig");
 
 pub const Tracer = @import("tracer/Tracer.zig");
 pub const Subscriber = @import("subscriber/Subscriber.zig");
