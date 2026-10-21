@@ -14,7 +14,7 @@ need_deinit: union(enum) {
     /// Data-only types.
     trivial,
     /// Need to call deinit on the type when it goes out of scope.
-    managed: *const fn (self: *anyopaque, ctx: ?*anyopaque) void,
+    managed: *const fn (self: *anyopaque) void,
 } = .trivial,
 
 /// Builds the metadata of `T`.
@@ -23,7 +23,7 @@ need_deinit: union(enum) {
 /// **NOTE**: A non-`pub` `deinit` is silently treated as `trivial` (leak).
 pub fn of(comptime T: type) @This() {
     const Deinit = struct {
-        fn call(self: *anyopaque, _: ?*anyopaque) void {
+        fn call(self: *anyopaque) void {
             T.deinit(@ptrCast(@alignCast(self)));
         }
     };
@@ -107,7 +107,7 @@ test "type with deinit is managed" {
     const meta = of(Probe);
 
     try expect(std.meta.activeTag(meta.need_deinit) == .managed);
-    meta.need_deinit.managed(&probe, null);
+    meta.need_deinit.managed(&probe);
     try expectEqual(1, calls);
 }
 

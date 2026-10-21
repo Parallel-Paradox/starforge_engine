@@ -31,7 +31,7 @@ pub fn deinit(self: *@This(), allocator: Allocator) void {
 
     switch (self.meta.need_deinit) {
         .trivial => {},
-        .managed => |deinitFn| deinitFn(ptr, null),
+        .managed => |deinitFn| deinitFn(ptr),
     }
     if (self.meta.size != 0)
         allocator.rawFree(ptr[0..self.meta.size], self.meta.alignment, @returnAddress());
