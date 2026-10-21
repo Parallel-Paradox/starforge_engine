@@ -1,10 +1,10 @@
 pub const random = @import("random.zig");
 pub const niche = @import("niche.zig");
 
-pub const AlignedBuffer = @import("aligned_buffer.zig");
-pub const EpochTime = @import("epoch_time.zig");
+pub const AlignedBuffer = @import("AlignedBuffer.zig");
+pub const EpochTime = @import("EpochTime.zig");
 pub const Uuid = @import("uuid/mod.zig").Uuid;
-pub const String = @import("string.zig");
+pub const String = @import("String.zig");
 
 test {
     _ = random;

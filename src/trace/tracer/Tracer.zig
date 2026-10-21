@@ -1,6 +1,6 @@
 //! Tracer can be used to create traces and register subscribers.
 
-pub const Default = @import("default.zig");
+pub const Default = @import("Default.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

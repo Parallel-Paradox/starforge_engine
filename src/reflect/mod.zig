@@ -1,8 +1,8 @@
 pub const base = @import("base");
 
-pub const Parcel = @import("parcel.zig");
-pub const TypeId = @import("type_id.zig");
-pub const TypeMeta = @import("type_meta.zig");
+pub const Parcel = @import("Parcel.zig");
+pub const TypeId = @import("TypeId.zig");
+pub const TypeMeta = @import("TypeMeta.zig");
 
 test {
     _ = Parcel;

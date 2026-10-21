@@ -1,6 +1,6 @@
 //! Subscriber defines the API for consuming trace data.
 
-pub const Terminal = @import("terminal.zig");
+pub const Terminal = @import("Terminal.zig");
 
 const std = @import("std");
 
