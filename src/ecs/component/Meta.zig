@@ -10,7 +10,7 @@ const reflect = se.reflect;
 const TypeId = reflect.TypeId;
 const TypeMeta = reflect.TypeMeta;
 
-type_meta: TypeMeta,
+type_meta: TypeMeta = .{},
 storage: Storage = .archetype,
 
 /// Builds the metadata of `T`.
@@ -34,8 +34,13 @@ fn storageOf(comptime T: type) Storage {
 }
 
 /// The unique id of the component type.
-pub fn type_id(self: @This()) TypeId {
+pub fn typeId(self: @This()) TypeId {
     return self.type_meta.id;
+}
+
+/// Whether both metas describe the same type and storage layout.
+pub fn eql(self: @This(), other: @This()) bool {
+    return self.typeId().eql(other.typeId()) and self.storage == other.storage;
 }
 
 /// The fully qualified name of the component type.
@@ -55,7 +60,7 @@ pub fn alignment(self: @This()) std.mem.Alignment {
 
 /// Runs `deinit` on `ptr`, asserting it is a `T`.
 pub fn callDeinit(self: @This(), comptime T: type, ptr: *T) void {
-    std.debug.assert(self.type_id().eql(TypeId.of(T)));
+    std.debug.assert(self.typeId().eql(TypeId.of(T)));
     self.callDeinitErased(ptr);
 }
 
@@ -74,10 +79,20 @@ const expectEqualStrings = std.testing.expectEqualStrings;
 test "expose the type metadata" {
     const meta = of(u32);
 
-    try expect(meta.type_id().eql(TypeId.of(u32)));
+    try expect(meta.typeId().eql(TypeId.of(u32)));
     try expectEqualStrings("u32", meta.name());
     try expectEqual(@sizeOf(u32), meta.size());
     try expectEqual(std.mem.Alignment.of(u32), meta.alignment());
+}
+
+test "eql compares the type and storage" {
+    const meta = of(u32);
+    var custom = meta;
+    custom.storage = .sparse_set;
+
+    try expect(meta.eql(of(u32)));
+    try expect(!meta.eql(of(i32)));
+    try expect(!meta.eql(custom));
 }
 
 test "callDeinit runs the managed deinit" {
