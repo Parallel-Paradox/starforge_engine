@@ -4,7 +4,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
-const root = @import("mod.zig");
+const root = @import("root.zig");
 const String = root.base.String;
 
 key: []const u8,

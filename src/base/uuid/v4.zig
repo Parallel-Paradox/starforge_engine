@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const root = @import("../mod.zig");
+const root = @import("../root.zig");
 const random = root.random;
 const Uuid = root.Uuid;
 

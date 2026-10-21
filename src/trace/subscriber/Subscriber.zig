@@ -4,7 +4,7 @@ pub const Terminal = @import("Terminal.zig");
 
 const std = @import("std");
 
-const root = @import("../mod.zig");
+const root = @import("../root.zig");
 const Span = root.Span;
 const Event = root.Event;
 

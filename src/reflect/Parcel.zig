@@ -3,7 +3,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const root = @import("mod.zig");
+const root = @import("root.zig");
 const TypeMeta = root.TypeMeta;
 
 meta: TypeMeta = .{},

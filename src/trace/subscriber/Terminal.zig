@@ -4,7 +4,7 @@ const Timestamp = std.Io.Timestamp;
 
 const builtin = @import("builtin");
 
-const root = @import("../mod.zig");
+const root = @import("../root.zig");
 const Trace = root.Trace;
 const Span = root.Span;
 const Event = root.Event;

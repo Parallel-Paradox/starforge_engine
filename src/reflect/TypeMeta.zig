@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-const root = @import("mod.zig");
+const root = @import("root.zig");
 const TypeId = root.TypeId;
 
 id: TypeId = .invalid,

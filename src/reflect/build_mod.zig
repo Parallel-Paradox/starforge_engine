@@ -13,7 +13,7 @@ pub fn build(
     test_step: *std.Build.Step,
 } {
     const mod = b.addModule(root.mod_name ++ "_" ++ mod_name, .{
-        .root_source_file = b.path("src/reflect/mod.zig"),
+        .root_source_file = b.path("src/reflect/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = imports,

@@ -1,7 +1,7 @@
 const std = @import("std");
 const Timestamp = std.Io.Timestamp;
 
-const root = @import("../mod.zig");
+const root = @import("../root.zig");
 const random = root.random;
 const Uuid = root.Uuid;
 

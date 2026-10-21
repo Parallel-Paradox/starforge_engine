@@ -6,7 +6,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Timestamp = std.Io.Timestamp;
 
-const root = @import("mod.zig");
+const root = @import("root.zig");
 const Trace = root.Trace;
 const Span = root.Span;
 const Attribute = root.Attribute;
