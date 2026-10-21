@@ -1,9 +1,10 @@
 pub const super = @import("../root.zig");
 
-pub const ComponentId = @import("Id.zig");
-pub const ComponentRegistry = @import("component/registry.zig");
+pub const component = @import("component/root.zig");
+
+pub const Id = @import("Id.zig");
 
 test {
-    _ = ComponentId;
-    _ = ComponentRegistry;
+    _ = Id;
+    _ = component;
 }
