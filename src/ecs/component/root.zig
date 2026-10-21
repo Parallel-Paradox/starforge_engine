@@ -4,3 +4,8 @@ pub const Id = super.Id;
 pub const Meta = @import("Meta.zig");
 pub const Registry = @import("Registry.zig");
 pub const Storage = enum { archetype, sparse_set };
+
+test {
+    _ = Meta;
+    _ = Registry;
+}
