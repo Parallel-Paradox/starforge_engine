@@ -25,13 +25,11 @@ pub const Value = union(enum) {
 
     pub fn deinit(self: *@This(), allocator: Allocator) void {
         switch (self.*) {
-            .string => |*str| str.deinit(allocator),
+            .string => |*string| string.deinit(allocator),
             .array => |*array| array.deinit(allocator),
             else => {},
         }
     }
-
-    pub const ConvertError = error{InvalidType};
 
     /// Returns the variant that a value of type `T` converts to, or `null` if unsupported.
     /// Const byte slices map to `str`, and `String` maps to `string`.
@@ -66,19 +64,27 @@ pub const Value = union(enum) {
 
     /// Converts a scalar or string `val` into a `Value`. Const byte slices become `str` (borrowed).
     /// Arrays are not handled here; use `ArrayValue.from` for them.
-    pub fn from(val: anytype) ConvertError!Value {
-        if (comptime tagFor(@TypeOf(val)) == null) return ConvertError.InvalidType;
-        const tag = comptime tagFor(@TypeOf(val)).?;
+    ///
+    /// Unsupported types are rejected at compile time.
+    pub fn from(val: anytype) Value {
+        const T = @TypeOf(val);
+        const tag = comptime tagFor(T) orelse @compileError(
+            "Attribute.Value.from does not support type " ++ @typeName(T),
+        );
         return @unionInit(Value, @tagName(tag), val);
     }
 
     /// Whether `T` can be converted by `from` (scalars and strings) or `fromArray` (arrays).
     pub fn isConvertible(comptime T: type) bool {
-        return tagFor(T) != null or ArrayValue.isConvertibleArray(T);
+        const info = @typeInfo(ArrayValue).@"union";
+        inline for (info.field_types) |field_type| {
+            if (T == field_type) return true;
+        }
+        return tagFor(T) != null or ArrayValue.elemTagFor(T) != null;
     }
 
     /// Wraps the result of `ArrayValue.from` in the `array` variant.
-    pub fn fromArray(allocator: Allocator, val: anytype) ArrayValue.ConvertError!Value {
+    pub fn fromArray(allocator: Allocator, val: anytype) Allocator.Error!Value {
         return .{ .array = try ArrayValue.from(allocator, val) };
     }
 
@@ -131,59 +137,49 @@ pub const ArrayValue = union(enum) {
     float: std.ArrayList(f64),
     bool: std.ArrayList(bool),
 
-    pub const ConvertError = Value.ConvertError || Allocator.Error;
-
     /// Takes ownership of an `ArrayList` whose element type matches a variant, or copies the
-    /// elements of a slice or array (`String` elements are cloned, `[]const u8` elements are
-    /// borrowed and must outlive the returned value). The caller must not deinit a list
-    /// passed in by value.
-    pub fn from(allocator: Allocator, val: anytype) ConvertError!ArrayValue {
+    /// elements of a slice (`String` elements are cloned, `[]const u8` elements are
+    /// borrowed and must outlive the returned value).
+    ///
+    /// Ownership of a passed `ArrayList` transfers only on success. On failure the caller
+    /// still owns it, so callers should free it in an `errdefer`.
+    pub fn from(allocator: Allocator, val: anytype) Allocator.Error!ArrayValue {
         const T = @TypeOf(val);
         const info = @typeInfo(ArrayValue).@"union";
         inline for (info.field_names, info.field_types) |field_name, field_type| {
             if (T == field_type) return @unionInit(ArrayValue, field_name, val);
         }
 
-        if (comptime !isSequence(T) or Value.tagFor(T) != null) return ConvertError.InvalidType;
-        const E = std.meta.Elem(T);
-        if (comptime Value.tagFor(E) == null) return ConvertError.InvalidType;
-        const tag = comptime Value.tagFor(E).?;
+        const tag = comptime elemTagFor(T) orelse @compileError(
+            "Attribute.ArrayValue.from does not support type " ++ @typeName(T),
+        );
 
         var list = try std.ArrayList(Value.ElemOf(tag)).initCapacity(allocator, val.len);
         errdefer {
             if (comptime tag == .string) for (list.items) |*str| str.deinit(allocator);
             list.deinit(allocator);
         }
-        for (val) |item| list.appendAssumeCapacity(try convertElem(tag, allocator, item));
+        for (val) |item| {
+            const elem = switch (tag) {
+                .string => try String.fromSlice(allocator, item.slice()),
+                else => @as(Value.ElemOf(tag), item),
+            };
+            list.appendAssumeCapacity(elem);
+        }
         return @unionInit(ArrayValue, @tagName(tag), list);
     }
 
-    fn convertElem(
-        comptime tag: std.meta.FieldEnum(Value),
-        allocator: Allocator,
-        item: anytype,
-    ) Allocator.Error!Value.ElemOf(tag) {
-        return switch (tag) {
-            .string => try String.fromSlice(allocator, item.slice()),
-            else => @as(Value.ElemOf(tag), item),
-        };
-    }
-
-    fn isConvertibleArray(comptime T: type) bool {
-        const info = @typeInfo(ArrayValue).@"union";
-        inline for (info.field_types) |field_type| {
-            if (T == field_type) return true;
-        }
-        return isSequence(T) and Value.tagFor(T) == null and Value.tagFor(std.meta.Elem(T)) != null;
-    }
-
-    fn isSequence(comptime T: type) bool {
-        return switch (@typeInfo(T)) {
+    /// The value tag of the elements of a copyable sequence `T`, or `null` if `T` is not one.
+    fn elemTagFor(comptime T: type) ?std.meta.FieldEnum(Value) {
+        const is_sequence = switch (@typeInfo(T)) {
             .array => true,
             .pointer => |ptr| ptr.size == .slice or
                 (ptr.size == .one and @typeInfo(ptr.child) == .array),
             else => false,
         };
+        if (comptime !is_sequence) return null;
+        if (comptime Value.tagFor(T) != null) return null;
+        return Value.tagFor(std.meta.Elem(T));
     }
 
     pub fn deinit(self: *@This(), allocator: Allocator) void {
@@ -222,49 +218,73 @@ pub const ArrayValue = union(enum) {
     }
 };
 
-/// Errors produced when turning a struct of named fields into attributes.
-pub const FormatError = error{
-    NotStruct,
-    InvalidFieldType,
-};
-
-/// Appends each field of `fields` to `list` as an attribute keyed by the field name.
-/// `String` and `ArrayList` fields are moved into `list`; `[]const u8` is borrowed.
+/// Adopts each field of `fields` to `list` as an attribute keyed by the field name.
+///
+/// Non-struct `fields` and field types that cannot be converted are compile errors.
+/// Ownership of `fields` is consumed only on success: on failure `fields` is left
+/// untouched, so callers that own fields must free them (e.g. with `errdefer`).
+/// Borrowed fields like `str` must outlive the given list.
 pub fn appendStruct(
     allocator: Allocator,
     list: *std.ArrayList(@This()),
     fields: anytype,
-) (Allocator.Error || FormatError)!void {
+) Allocator.Error!void {
     const field_info = switch (@typeInfo(@TypeOf(fields))) {
         .@"struct" => |info| info,
-        else => return FormatError.NotStruct,
+        else => @compileError(
+            "appendStruct expects a struct, found " ++ @typeName(@TypeOf(fields)),
+        ),
     };
     inline for (field_info.field_types) |field_type| {
-        if (comptime !Value.isConvertible(field_type)) return FormatError.InvalidFieldType;
+        if (comptime !Value.isConvertible(field_type)) @compileError(
+            "appendStruct cannot convert field type " ++ @typeName(field_type),
+        );
     }
 
-    inline for (field_info.field_names, field_info.field_types) |field_name, field_type| {
-        var value = try toValue(allocator, field_type, @field(fields, field_name));
-        errdefer value.deinit(allocator);
-        try list.append(allocator, .{ .key = field_name, .value = value });
+    const count = field_info.field_names.len;
+    try list.ensureUnusedCapacity(allocator, count);
+
+    const start = list.items.len;
+    var needs_deinit: [count]bool = undefined;
+    var converted: usize = 0;
+    errdefer {
+        for (list.items[start..], needs_deinit[0..converted]) |*attr, needs| {
+            if (needs) attr.value.deinit(allocator);
+        }
+        list.shrinkRetainingCapacity(start);
+    }
+
+    inline for (field_info.field_names, field_info.field_types, 0..) |field_name, field_type, i| {
+        const value = try toValue(allocator, field_type, @field(fields, field_name));
+        list.appendAssumeCapacity(.{ .key = field_name, .value = value });
+        // Moved payloads still belong to `fields` until the whole call succeeds.
+        needs_deinit[i] = comptime !movesPayload(field_type);
+        converted = i + 1;
     }
 }
 
-/// Converts a field already validated by `Value.isConvertible`. The conversion errors other
-/// than allocation failure are unreachable for such types.
+/// Whether `Value.from` or `ArrayValue.from` moves `T`'s payload instead of copying it.
+fn movesPayload(comptime T: type) bool {
+    if (T == String) return true;
+    const info = @typeInfo(ArrayValue).@"union";
+    inline for (info.field_types) |field_type| {
+        if (T == field_type) return true;
+    }
+    return false;
+}
+
+/// Converts a field already validated by `Value.isConvertible`, so only allocation can fail.
 fn toValue(allocator: Allocator, comptime T: type, val: T) Allocator.Error!Value {
     if (comptime Value.tagFor(T) != null) {
-        return Value.from(val) catch unreachable;
+        return Value.from(val);
     }
-    return Value.fromArray(allocator, val) catch |err| switch (err) {
-        error.InvalidType => unreachable,
-        error.OutOfMemory => error.OutOfMemory,
-    };
+    return Value.fromArray(allocator, val);
 }
 
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expectEqual = std.testing.expectEqual;
 const expectError = std.testing.expectError;
+const expect = std.testing.expect;
 
 fn expectValueWrites(value: Value, expected: []const u8) !void {
     var output = Writer.Allocating.init(std.testing.allocator);
@@ -356,13 +376,13 @@ test "attribute deinit frees an owned value" {
 test "from converts supported values into variants" {
     const allocator = std.testing.allocator;
 
-    const str_value = try Value.from("hi");
+    const str_value = Value.from("hi");
     try expectEqualStrings("hi", str_value.str);
-    const bool_value = try Value.from(true);
+    const bool_value = Value.from(true);
     try expectEqual(true, bool_value.bool);
-    const uint_value = try Value.from(@as(u64, 7));
-    try expectEqual(@as(u64, 7), uint_value.uint);
-    try expectError(error.InvalidType, Value.from(@as(?i32, null)));
+    const uint_value = Value.from(@as(u64, 7));
+    try expectEqual(7, uint_value.uint);
+    try expect(!Value.isConvertible(?i32));
 
     var list = try Value.fromArray(allocator, &[_]i64{ 1, -2 });
     defer list.deinit(allocator);
@@ -370,28 +390,28 @@ test "from converts supported values into variants" {
 }
 
 test "from converts every supported scalar" {
-    const i8_value = try Value.from(@as(i8, -3));
-    try expectEqual(@as(i64, -3), i8_value.int);
+    const i8_value = Value.from(@as(i8, -3));
+    try expectEqual(-3, i8_value.int);
 
-    const u8_value = try Value.from(@as(u8, 255));
-    try expectEqual(@as(u64, 255), u8_value.uint);
+    const u8_value = Value.from(@as(u8, 255));
+    try expectEqual(255, u8_value.uint);
 
-    const u64_value = try Value.from(@as(u64, std.math.maxInt(u64)));
-    try expectEqual(@as(u64, std.math.maxInt(u64)), u64_value.uint);
+    const u64_value = Value.from(@as(u64, std.math.maxInt(u64)));
+    try expectEqual(std.math.maxInt(u64), u64_value.uint);
 
-    const comptime_value = try Value.from(-5);
-    try expectEqual(@as(i64, -5), comptime_value.int);
+    const comptime_value = Value.from(-5);
+    try expectEqual(-5, comptime_value.int);
 
-    const f32_value = try Value.from(@as(f32, 2.5));
-    try expectEqual(@as(f64, 2.5), f32_value.float);
+    const f32_value = Value.from(@as(f32, 2.5));
+    try expectEqual(2.5, f32_value.float);
 
-    const float_value = try Value.from(0.25);
-    try expectEqual(@as(f64, 0.25), float_value.float);
+    const float_value = Value.from(0.25);
+    try expectEqual(0.25, float_value.float);
 
-    const bool_value = try Value.from(false);
+    const bool_value = Value.from(false);
     try expectEqual(false, bool_value.bool);
 
-    const str_value = try Value.from(@as([]const u8, "x"));
+    const str_value = Value.from(@as([]const u8, "x"));
     try expectEqualStrings("x", str_value.str);
 }
 
@@ -416,14 +436,14 @@ test "appendStruct appends each struct field as an attribute" {
         .list = num_list,
     });
 
-    try expectEqual(@as(usize, 6), list.items.len);
+    try expectEqual(6, list.items.len);
     try expectEqualStrings("x", list.items[0].key);
-    try expectEqual(@as(i64, 1), list.items[0].value.int);
+    try expectEqual(1, list.items[0].value.int);
     try expectEqualStrings("owned", list.items[4].value.string.slice());
-    try expectEqual(@as(u64, 3), list.items[5].value.array.uint.items[0]);
+    try expectEqual(3, list.items[5].value.array.uint.items[0]);
 }
 
-test "appendStruct frees a moved owned value when append fails" {
+test "appendStruct leaves fields to the caller when it fails" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     const allocator = failing.allocator();
 
@@ -431,19 +451,34 @@ test "appendStruct frees a moved owned value when append fails" {
     defer list.deinit(allocator);
 
     const filler: [64]u8 = @splat('a');
-    const owned = try String.fromSlice(std.testing.allocator, &filler);
+    var owned = try String.fromSlice(std.testing.allocator, &filler);
+    defer owned.deinit(std.testing.allocator);
+
     try expectError(error.OutOfMemory, appendStruct(allocator, &list, .{ .owned = owned }));
+    try expectEqual(0, list.items.len);
 }
 
-test "appendStruct rejects non-struct and unsupported fields" {
+test "appendStruct frees copies it made when a later field fails" {
     const allocator = std.testing.allocator;
 
     var list: std.ArrayList(@This()) = .empty;
     defer list.deinit(allocator);
 
-    try expectError(FormatError.NotStruct, appendStruct(allocator, &list, @as(i64, 1)));
-    try expectError(FormatError.InvalidFieldType, appendStruct(allocator, &list, .{ .x = null }));
-    try expectEqual(@as(usize, 0), list.items.len);
+    // Growing `list` and the first array copy succeed; the second copy fails.
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 2 });
+    try expectError(
+        error.OutOfMemory,
+        appendStruct(failing.allocator(), &list, .{ .a = [_]i64{ 1, 2 }, .b = [_]i64{ 3, 4 } }),
+    );
+    try expectEqual(0, list.items.len);
+}
+
+test "appendStruct rejects unsupported fields at compile time" {
+    // Non-struct values and non-convertible field types are compile errors, e.g.:
+    // _ = appendStruct(std.testing.allocator, &list, @as(i64, 1));
+    // _ = appendStruct(std.testing.allocator, &list, .{ .x = null });
+
+    try expect(!Value.isConvertible(?i32));
 }
 
 test "appendStruct builds attributes for event and link lists" {
@@ -455,34 +490,36 @@ test "appendStruct builds attributes for event and link lists" {
         event_attrs.deinit(allocator);
     }
     try appendStruct(allocator, &event_attrs, .{ .k = "v" });
-    try expectEqual(@as(usize, 1), event_attrs.items.len);
+    try expectEqual(1, event_attrs.items.len);
 
     var link_attrs: std.ArrayList(@This()) = .empty;
     defer link_attrs.deinit(allocator);
     try appendStruct(allocator, &link_attrs, .{ .x = @as(i64, -1) });
-    try expectEqual(@as(i64, -1), link_attrs.items[0].value.int);
+    try expectEqual(-1, link_attrs.items[0].value.int);
 }
 
 test "from takes ownership of a String" {
     const allocator = std.testing.allocator;
 
-    var value = try Value.from(try String.fromSlice(allocator, "a,b"));
+    var value = Value.from(try String.fromSlice(allocator, "a,b"));
     defer value.deinit(allocator);
     try expectValueWrites(value, "\"a,b\"");
 }
 
-test "from rejects unsupported types" {
+test "from rejects unsupported types at compile time" {
     const Color = enum { red };
 
-    try expectError(error.InvalidType, Value.from(@as(i128, 1)));
-    try expectError(error.InvalidType, Value.from(@as(f128, 1.0)));
-    try expectError(error.InvalidType, Value.from(@as(u65, 1)));
-    try expectError(error.InvalidType, Value.from(Color.red));
-    try expectError(error.InvalidType, Value.from(.{ .x = 1 }));
-    try expectError(error.InvalidType, Value.from([_]i64{ 1, 2 }));
+    try expect(Value.tagFor(i128) == null);
+    try expect(Value.tagFor(f128) == null);
+    try expect(Value.tagFor(u65) == null);
+    try expect(Value.tagFor(Color) == null);
+    try expect(Value.tagFor(struct { x: i32 }) == null);
+    try expect(Value.tagFor([2]i64) == null);
+    try expect(Value.tagFor([]u8) == null);
 
-    var buf = [_]u8{'a'};
-    try expectError(error.InvalidType, Value.from(@as([]u8, &buf)));
+    // The following would fail to compile:
+    // _ = Value.from(@as(i128, 1));
+    // _ = Value.from(Color.red);
 }
 
 test "ArrayValue.from copies slices and arrays of each scalar type" {
@@ -530,6 +567,7 @@ test "ArrayValue.from takes ownership of an ArrayList" {
     const allocator = std.testing.allocator;
 
     var list = try std.ArrayList(i64).initCapacity(allocator, 2);
+    errdefer list.deinit(allocator);
     try list.appendSlice(allocator, &[_]i64{ 3, 4 });
 
     var value = try Value.fromArray(allocator, list);
@@ -537,15 +575,12 @@ test "ArrayValue.from takes ownership of an ArrayList" {
     try expectValueWrites(value, "[3, 4]");
 }
 
-test "ArrayValue.from rejects unsupported sequences" {
-    const allocator = std.testing.allocator;
+test "ArrayValue.from rejects unsupported sequences at compile time" {
+    try expect(!Value.isConvertible([1]?i32));
+    try expect(!Value.isConvertible([1][2]i64));
+    try expect(!Value.isConvertible(std.ArrayList(i128)));
 
-    try expectError(error.InvalidType, ArrayValue.from(allocator, @as(i64, 1)));
-    try expectError(error.InvalidType, ArrayValue.from(allocator, [_]?i32{null}));
-    try expectError(error.InvalidType, ArrayValue.from(allocator, [_][2]i64{.{ 1, 2 }}));
-    try expectError(error.InvalidType, ArrayValue.from(allocator, "abc"));
-    try expectError(
-        error.InvalidType,
-        ArrayValue.from(allocator, std.ArrayList(i128).empty),
-    );
+    // Unsupported inputs are compile errors, e.g.:
+    // _ = ArrayValue.from(std.testing.allocator, @as(i64, 1));
+    // _ = ArrayValue.from(std.testing.allocator, "abc");
 }

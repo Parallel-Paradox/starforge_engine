@@ -131,7 +131,7 @@ pub fn initEvent(self: *const @This(), options: Event.Options) Event {
 }
 
 /// Appends each field of the struct `attrs` as an attribute. See `Attribute.appendStruct`.
-pub fn addAttrs(self: *@This(), attrs: anytype) (Allocator.Error || Attribute.FormatError)!void {
+pub fn addAttrs(self: *@This(), attrs: anytype) Allocator.Error!void {
     return Attribute.appendStruct(self.trace.tracer.getAllocator(), &self.attrs, attrs);
 }
 
@@ -141,7 +141,7 @@ pub fn linkTo(
     trace_id: Trace.Id,
     span_id: Id,
     attrs: anytype,
-) (Allocator.Error || Attribute.FormatError)!void {
+) Allocator.Error!void {
     const allocator = self.trace.tracer.getAllocator();
     var new_link: Link = .{ .trace_id = trace_id, .span_id = span_id };
     errdefer new_link.deinit(allocator);

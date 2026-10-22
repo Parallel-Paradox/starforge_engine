@@ -58,7 +58,7 @@ pub fn deinit(self: *@This()) void {
 }
 
 /// Appends each field of the struct `attrs` as an attribute. See `Attribute.appendStruct`.
-pub fn addAttrs(self: *@This(), attrs: anytype) (Allocator.Error || Attribute.FormatError)!void {
+pub fn addAttrs(self: *@This(), attrs: anytype) Allocator.Error!void {
     return Attribute.appendStruct(self.trace.tracer.getAllocator(), &self.attrs, attrs);
 }
 
