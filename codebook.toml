@@ -1,9 +1,13 @@
 words = [
+    "anyframe",
     "comptime",
     "deinit",
+    "deinits",
     "ecs",
     "eql",
+    "errdefer",
     "ints",
+    "oom",
     "sso",
     "starforge",
     "strs",
