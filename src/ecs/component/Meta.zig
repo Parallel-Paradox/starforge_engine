@@ -4,6 +4,7 @@ const std = @import("std");
 
 const root = @import("root.zig");
 const Storage = root.Storage;
+const Mark = root.Mark;
 
 const se = root.super.super;
 const reflect = se.reflect;
@@ -13,24 +14,16 @@ const TypeMeta = reflect.TypeMeta;
 type_meta: TypeMeta = .{},
 storage: Storage = .archetype,
 
-/// Builds the metadata of `T`.
-/// A `pub const storage` of type `Storage` overrides the default layout.
+/// Builds the metadata of the component `T`.
+/// `T` must declare `pub const se_component: Mark = .{};`.
 pub fn of(comptime T: type) @This() {
+    if (comptime !root.isComponent(T)) @compileError(
+        @typeName(T) ++ " is not a component: declare pub const se_component: Mark = .{};",
+    );
     return .{
         .type_meta = TypeMeta.of(T),
-        .storage = storageOf(T),
+        .storage = T.se_component.storage,
     };
-}
-
-fn storageOf(comptime T: type) Storage {
-    switch (@typeInfo(T)) {
-        .@"struct", .@"union", .@"enum", .@"opaque" => {},
-        else => return .archetype,
-    }
-    if (!@hasDecl(T, "storage")) return .archetype;
-
-    const custom = T.storage;
-    return if (@TypeOf(custom) == Storage) custom else .archetype;
 }
 
 /// The unique id of the component type.
@@ -38,7 +31,7 @@ pub fn typeId(self: @This()) TypeId {
     return self.type_meta.id;
 }
 
-/// Whether both metas describe the same type and storage layout.
+/// Whether both meta describe the same type and storage layout.
 pub fn eql(self: @This(), other: @This()) bool {
     return self.typeId().eql(other.typeId()) and self.storage == other.storage;
 }
@@ -76,27 +69,52 @@ const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
-test "expose the type metadata" {
-    const meta = of(u32);
+const Position = struct {
+    pub const se_component: Mark = .{};
+    x: i32,
+    y: i32,
+};
 
-    try expect(meta.typeId().eql(TypeId.of(u32)));
-    try expectEqualStrings("u32", meta.name());
-    try expectEqual(@sizeOf(u32), meta.size());
-    try expectEqual(std.mem.Alignment.of(u32), meta.alignment());
+const Velocity = struct {
+    pub const se_component: Mark = .{};
+    dx: f32,
+    dy: f32,
+};
+
+const Sparse = struct {
+    pub const se_component: Mark = .{ .storage = .sparse_set };
+    value: u32,
+};
+
+test "expose the type metadata" {
+    const meta = of(Position);
+
+    try expect(meta.typeId().eql(TypeId.of(Position)));
+    try expectEqualStrings(@typeName(Position), meta.name());
+    try expectEqual(@sizeOf(Position), meta.size());
+    try expectEqual(std.mem.Alignment.of(Position), meta.alignment());
 }
 
 test "eql compares the type and storage" {
-    const meta = of(u32);
+    const meta = of(Position);
     var custom = meta;
     custom.storage = .sparse_set;
 
-    try expect(meta.eql(of(u32)));
-    try expect(!meta.eql(of(i32)));
+    try expect(meta.eql(of(Position)));
+    try expect(!meta.eql(of(Velocity)));
     try expect(!meta.eql(custom));
+}
+
+test "isComponent detects the se_component declaration" {
+    try expect(root.isComponent(Position));
+    try expect(root.isComponent(Sparse));
+    try expect(!root.isComponent(u32));
+    try expect(!root.isComponent(Mark));
 }
 
 test "callDeinit runs the managed deinit" {
     const Probe = struct {
+        pub const se_component: Mark = .{};
         calls: *usize,
 
         pub fn deinit(self: *@This()) void {
@@ -114,24 +132,24 @@ test "callDeinit runs the managed deinit" {
 }
 
 test "callDeinit is a no-op for trivial types" {
-    var value: u32 = 0;
-    const meta = of(u32);
+    const Trivial = struct {
+        pub const se_component: Mark = .{};
+        value: u32,
+    };
 
-    meta.callDeinit(u32, &value);
+    var value = Trivial{ .value = 0 };
+    const meta = of(Trivial);
+
+    meta.callDeinit(Trivial, &value);
     meta.callDeinitErased(&value);
-    try expectEqual(0, value);
+    try expectEqual(0, value.value);
 }
 
-test "of resolves the storage layout" {
-    try expectEqual(Storage.archetype, of(u32).storage);
-
-    const Sparse = struct {
-        pub const storage: Storage = .sparse_set;
-    };
+test "of reads the storage layout from the mark" {
+    try expectEqual(Storage.archetype, of(Position).storage);
     try expectEqual(Storage.sparse_set, of(Sparse).storage);
 
-    const Wrong = struct {
-        pub const storage: u8 = 1;
-    };
-    try expectEqual(Storage.archetype, of(Wrong).storage);
+    // A missing or mistyped mark is a compile error:
+    // _ = of(u32);
+    // _ = of(struct { pub const se_component: u8 = 1; });
 }

@@ -102,19 +102,29 @@ const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectError = std.testing.expectError;
 
+const U32 = struct {
+    pub const se_component: root.Mark = .{};
+    value: u32,
+};
+
+const I32 = struct {
+    pub const se_component: root.Mark = .{};
+    value: i32,
+};
+
 test "register assigns one id per type" {
     var registry = init(std.testing.allocator);
     defer registry.deinit();
 
-    const first = try registry.register(u32);
-    const second = try registry.register(i32);
+    const first = try registry.register(U32);
+    const second = try registry.register(I32);
 
     try expectEqual(0, first.index.get());
     try expectEqual(1, second.index.get());
     try expectEqual(1, first.generation.get());
 
-    try expect(first.eql(try registry.register(u32)));
-    try expect(first.eql(try registry.registerMeta(CompMeta.of(u32))));
+    try expect(first.eql(try registry.register(U32)));
+    try expect(first.eql(try registry.registerMeta(CompMeta.of(U32))));
     try expect(!first.eql(second));
 }
 
@@ -122,12 +132,12 @@ test "unregister retires the id for reuse" {
     var registry = init(std.testing.allocator);
     defer registry.deinit();
 
-    try registry.unregister(TypeId.of(i32));
+    try registry.unregister(TypeId.of(I32));
 
-    const first = try registry.register(u32);
-    try registry.unregister(TypeId.of(u32));
+    const first = try registry.register(U32);
+    try registry.unregister(TypeId.of(U32));
 
-    const second = try registry.register(u32);
+    const second = try registry.register(U32);
     try expectEqual(first.index.get(), second.index.get());
     try expectEqual(first.generation.get() + 1, second.generation.get());
     try expect(!first.eql(second));
@@ -137,20 +147,20 @@ test "getMeta looks up by component id and type id" {
     var registry = init(std.testing.allocator);
     defer registry.deinit();
 
-    const id = try registry.register(u32);
-    const meta = CompMeta.of(u32);
+    const id = try registry.register(U32);
+    const meta = CompMeta.of(U32);
 
     try expect(meta.eql(registry.getMeta(id).?));
-    try expect(meta.eql(registry.getMetaByType(TypeId.of(u32)).?));
+    try expect(meta.eql(registry.getMetaByType(TypeId.of(U32)).?));
 
     try expect(registry.getMeta(CompId.invalid) == null);
-    try expect(registry.getMetaByType(TypeId.of(i32)) == null);
+    try expect(registry.getMetaByType(TypeId.of(I32)) == null);
 
-    try registry.unregister(TypeId.of(u32));
+    try registry.unregister(TypeId.of(U32));
     try expect(registry.getMeta(id) == null);
-    try expect(registry.getMetaByType(TypeId.of(u32)) == null);
+    try expect(registry.getMetaByType(TypeId.of(U32)) == null);
 
-    const reused = try registry.register(u32);
+    const reused = try registry.register(U32);
     try expect(registry.getMeta(id) == null);
     try expect(registry.getMeta(reused) != null);
 }
@@ -159,7 +169,7 @@ test "registerMeta rejects conflicting metadata" {
     var registry = init(std.testing.allocator);
     defer registry.deinit();
 
-    const meta = CompMeta.of(u32);
+    const meta = CompMeta.of(U32);
     _ = try registry.registerMeta(meta);
 
     var conflicting = meta;
