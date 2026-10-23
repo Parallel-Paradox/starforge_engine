@@ -13,10 +13,12 @@ mask: BitSet,
 hash: u64 = 0,
 
 pub fn init(allocator: Allocator) @This() {
-    return @This(){
+    var self: @This() = .{
         // Impossible to fail since we start with empty bitset.
         .mask = BitSet.initEmpty(allocator, 0) catch unreachable,
     };
+    self.rehash();
+    return self;
 }
 
 pub fn deinit(self: *@This(), allocator: Allocator) void {
@@ -53,7 +55,17 @@ fn rehash(self: *@This()) void {
 }
 
 pub fn eql(self: @This(), other: @This()) bool {
-    return self.hash == other.hash and self.mask.eql(other.mask);
+    if (self.hash != other.hash) return false;
+
+    const self_last = self.mask.findLastSet() orelse return other.mask.findLastSet() == null;
+    const other_last = other.mask.findLastSet() orelse return false;
+    if (self_last != other_last) return false;
+
+    const num_masks = maskCount(self_last + 1);
+    for (self.mask.masks[0..num_masks], other.mask.masks[0..num_masks]) |a, b| {
+        if (a != b) return false;
+    }
+    return true;
 }
 
 /// Whether this signature contains every component in `other`.
@@ -80,13 +92,17 @@ pub fn intersects(self: @This(), other: @This()) bool {
 }
 
 /// Whether this signature has the component `id`.
-pub fn has(self: *const @This(), id: CompId) bool {
+/// `id` must be valid (not `CompId.invalid`).
+pub fn has(self: @This(), id: CompId) bool {
     const index = bitIndex(id);
     return index < self.mask.capacity() and self.mask.isSet(index);
 }
 
 /// Adds every component ID in `ids` to the signature.
+/// Every id in `ids` must be valid (not `CompId.invalid`).
 pub fn add(self: *@This(), allocator: Allocator, ids: []const CompId) Allocator.Error!void {
+    if (ids.len == 0) return;
+
     const capacity = self.mask.capacity();
     var new_len = capacity;
     for (ids) |id| {
@@ -102,22 +118,25 @@ pub fn add(self: *@This(), allocator: Allocator, ids: []const CompId) Allocator.
 }
 
 /// Removes every component ID in `ids` from the signature.
-/// Always shrink to fit after removing components.
-pub fn remove(self: *@This(), allocator: Allocator, ids: []const CompId) Allocator.Error!void {
+/// Every id in `ids` must be valid (not `CompId.invalid`).
+/// The mask keeps its capacity; removing never shrinks it.
+pub fn remove(self: *@This(), ids: []const CompId) void {
+    if (ids.len == 0) return;
+
     const capacity = self.mask.capacity();
     for (ids) |id| {
         const index = bitIndex(id);
         if (index < capacity) self.mask.unset(index);
     }
 
-    // Drop the bits above the highest remaining component.
-    const new_len = if (self.mask.findLastSet()) |last_bit| last_bit + 1 else 0;
-    try self.mask.resize(allocator, new_len, false);
-
     self.rehash();
 }
 
 /// A hash map that uses signatures as keys and stores values of type T.
+///
+/// The map does not own its keys: it never frees or updates the bitset a key
+/// holds. Store a `clone` and keep it alive and unchanged for as long as the
+/// entry exists.
 pub fn Lookup(comptime T: type) type {
     const Signature = @This();
 
@@ -137,14 +156,30 @@ pub fn Lookup(comptime T: type) type {
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
+/// Builds component ids with generation 1 from the given component indexes.
+fn compIds(comptime indexes: []const u32) [indexes.len]CompId {
+    var result: [indexes.len]CompId = undefined;
+    for (indexes, 0..) |index, i| {
+        result[i] = CompId.init(index, 1);
+    }
+    return result;
+}
+
+/// Initializes a signature that holds the components at `indexes`.
+fn initWith(allocator: Allocator, comptime indexes: []const u32) Allocator.Error!@This() {
+    var signature = init(allocator);
+    errdefer signature.deinit(allocator);
+
+    const components = compIds(indexes);
+    try signature.add(allocator, &components);
+    return signature;
+}
+
 test "add sets component bits" {
     const allocator = std.testing.allocator;
 
-    var signature = init(allocator);
+    var signature = try initWith(allocator, &.{ 0, 7, 70 });
     defer signature.deinit(allocator);
-
-    const ids = [_]CompId{ CompId.init(0, 1), CompId.init(7, 1), CompId.init(70, 1) };
-    try signature.add(allocator, &ids);
 
     try expect(signature.has(CompId.init(0, 1)));
     try expect(signature.has(CompId.init(7, 1)));
@@ -152,60 +187,43 @@ test "add sets component bits" {
     try expect(!signature.has(CompId.init(6, 1)));
     try expect(!signature.has(CompId.init(71, 1)));
 
-    // Adding the same components again changes neither the bits nor the capacity.
-    try signature.add(allocator, &ids);
+    // Adding existing components is a no-op.
+    const again = compIds(&.{ 0, 7, 70 });
+    try signature.add(allocator, &again);
     try expectEqual(@as(usize, 3), signature.mask.count());
-    try expectEqual(@as(usize, 71), signature.mask.capacity());
 }
 
-test "remove clears bits and shrinks to fit" {
+test "remove clears bits" {
     const allocator = std.testing.allocator;
 
-    var signature = init(allocator);
+    var signature = try initWith(allocator, &.{ 3, 70 });
     defer signature.deinit(allocator);
 
-    const ids = [_]CompId{ CompId.init(3, 1), CompId.init(70, 1) };
-    try signature.add(allocator, &ids);
-    try expectEqual(@as(usize, 71), signature.mask.capacity());
-
-    const last = [_]CompId{CompId.init(70, 1)};
-    try signature.remove(allocator, &last);
+    const high = compIds(&.{70});
+    signature.remove(&high);
     try expect(!signature.has(CompId.init(70, 1)));
     try expect(signature.has(CompId.init(3, 1)));
-    try expectEqual(@as(usize, 4), signature.mask.capacity());
 
-    const first = [_]CompId{CompId.init(3, 1)};
-    try signature.remove(allocator, &first);
+    const remaining = compIds(&.{3});
+    signature.remove(&remaining);
     try expect(!signature.has(CompId.init(3, 1)));
-    try expectEqual(@as(usize, 0), signature.mask.capacity());
 
     // Removing a component the signature does not have is a no-op.
-    try signature.remove(allocator, &first);
-    try expectEqual(@as(usize, 0), signature.mask.capacity());
+    signature.remove(&remaining);
+    try expectEqual(@as(usize, 0), signature.mask.count());
 }
 
 test "contains and intersects compare component sets" {
     const allocator = std.testing.allocator;
 
-    var all = init(allocator);
+    var all = try initWith(allocator, &.{ 1, 2, 70 });
     defer all.deinit(allocator);
-    const all_ids = [_]CompId{ CompId.init(1, 1), CompId.init(2, 1), CompId.init(70, 1) };
-    try all.add(allocator, &all_ids);
-
-    var some = init(allocator);
+    var some = try initWith(allocator, &.{ 1, 70 });
     defer some.deinit(allocator);
-    const some_ids = [_]CompId{ CompId.init(1, 1), CompId.init(70, 1) };
-    try some.add(allocator, &some_ids);
-
-    var other = init(allocator);
+    var other = try initWith(allocator, &.{2});
     defer other.deinit(allocator);
-    const other_ids = [_]CompId{CompId.init(2, 1)};
-    try other.add(allocator, &other_ids);
-
-    var disjoint = init(allocator);
+    var disjoint = try initWith(allocator, &.{5});
     defer disjoint.deinit(allocator);
-    const disjoint_ids = [_]CompId{CompId.init(5, 1)};
-    try disjoint.add(allocator, &disjoint_ids);
 
     var empty = init(allocator);
     defer empty.deinit(allocator);
@@ -224,36 +242,43 @@ test "contains and intersects compare component sets" {
     try expect(!all.intersects(empty));
 }
 
-test "eql and clone track the component set" {
+test "eql and clone compare component sets" {
     const allocator = std.testing.allocator;
 
-    var a = init(allocator);
+    var empty = init(allocator);
+    defer empty.deinit(allocator);
+
+    var a = try initWith(allocator, &.{ 0, 3 });
     defer a.deinit(allocator);
-    var b = init(allocator);
+    var b = try initWith(allocator, &.{ 3, 0 });
     defer b.deinit(allocator);
 
-    // Empty signatures hash consistently.
+    // Component order does not matter.
     try expect(a.eql(b));
     try expectEqual(a.hash, b.hash);
 
-    const ids = [_]CompId{ CompId.init(0, 1), CompId.init(3, 1) };
-    try a.add(allocator, &ids);
-    try b.add(allocator, &ids);
-    try expect(a.eql(b));
-    try expectEqual(a.hash, b.hash);
+    // Mask capacity does not matter either.
+    var wide = try initWith(allocator, &.{ 0, 3, 70 });
+    defer wide.deinit(allocator);
+    const high = compIds(&.{70});
+    wide.remove(&high);
+    try expect(a.eql(wide));
+    try expectEqual(a.hash, wide.hash);
 
-    var cloned = try a.clone(allocator);
+    // Clearing a signature makes it equal to a fresh one.
+    const both = compIds(&.{ 0, 3 });
+    a.remove(&both);
+    try expect(empty.eql(a));
+    try expectEqual(empty.hash, a.hash);
+
+    // A clone is independent of its source.
+    var cloned = try b.clone(allocator);
     defer cloned.deinit(allocator);
-    try expect(a.eql(cloned));
-
-    const extra = [_]CompId{CompId.init(4, 1)};
+    try expect(b.eql(cloned));
+    const extra = compIds(&.{4});
     try cloned.add(allocator, &extra);
-    try expect(!a.eql(cloned));
-    try expect(!a.has(CompId.init(4, 1)));
-
-    try b.remove(allocator, &ids);
-    try expect(!a.eql(b));
-    try expect(a.eql(a));
+    try expect(!b.eql(cloned));
+    try expect(!b.has(CompId.init(4, 1)));
 }
 
 test "Lookup maps signatures to values" {
@@ -265,32 +290,24 @@ test "Lookup maps signatures to values" {
     var map: Map = .empty;
     defer map.deinit(allocator);
 
-    var first = init(allocator);
-    const first_ids = [_]CompId{ CompId.init(1, 1), CompId.init(70, 1) };
-    try first.add(allocator, &first_ids);
+    const first = try initWith(allocator, &.{ 1, 70 });
     try map.put(allocator, try first.clone(allocator), 10);
 
-    var second = init(allocator);
-    const second_ids = [_]CompId{CompId.init(2, 1)};
-    try second.add(allocator, &second_ids);
+    const second = try initWith(allocator, &.{2});
     try map.put(allocator, try second.clone(allocator), 20);
 
-    // An independently built signature with the same components finds the entry.
-    var probe = init(allocator);
-    const probe_ids = [_]CompId{ CompId.init(70, 1), CompId.init(1, 1) };
-    try probe.add(allocator, &probe_ids);
+    // The same components in a different order find the same entry.
+    const probe = try initWith(allocator, &.{ 70, 1 });
 
     try expectEqual(@as(?u32, 10), map.get(probe));
     try expectEqual(@as(u32, 2), map.count());
 
-    // Putting an equal key updates the stored value.
+    // Putting an equal key updates the value in place.
     try map.put(allocator, try probe.clone(allocator), 11);
     try expectEqual(@as(u32, 2), map.count());
     try expectEqual(@as(?u32, 11), map.get(probe));
 
-    var missing = init(allocator);
-    const missing_ids = [_]CompId{CompId.init(5, 1)};
-    try missing.add(allocator, &missing_ids);
+    const missing = try initWith(allocator, &.{5});
     try expectEqual(@as(?u32, null), map.get(missing));
 
     try expect(map.remove(probe));
