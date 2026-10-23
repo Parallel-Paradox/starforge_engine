@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Alignment = std.mem.Alignment;
 
 const engine = @import("engine");
 const ecs = engine.ecs;
@@ -80,6 +81,13 @@ pub fn deinit(self: *@This(), allocator: Allocator) void {
     self.id_to_col.deinit();
 }
 
+/// The alignment of the archetype buffer: the first column's alignment, since
+/// columns are sorted by alignment descending, or 1 when there are no columns.
+pub fn alignment(self: @This()) Alignment {
+    if (self.columns.items.len == 0) return .@"1";
+    return self.columns.items[0].meta.alignment;
+}
+
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
@@ -129,6 +137,8 @@ test "init sorts columns and builds the lookup tables" {
     try expectEqual(@as(?usize, 0), meta.id_to_col.get(TypeId.of(Wide)));
     try expectEqual(@as(?usize, 1), meta.id_to_col.get(TypeId.of(Narrow)));
     try expectEqual(@as(?usize, 2), meta.id_to_col.get(TypeId.of(Tag)));
+
+    try expectEqual(std.mem.Alignment.of(Wide), meta.alignment());
 }
 
 test "init breaks layout ties by component id" {
@@ -169,4 +179,5 @@ test "init of no components has an empty layout" {
     try expectEqual(@as(usize, 0), meta.columns.items.len);
     try expectEqual(@as(usize, 0), meta.id_to_col.count());
     try expectEqual(@as(usize, 0), meta.signature.mask.count());
+    try expectEqual(std.mem.Alignment.@"1", meta.alignment());
 }
