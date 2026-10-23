@@ -1,4 +1,4 @@
-pub const engine = @import("engine");
+const engine = @import("engine");
 
 pub const Id = engine.ecs.Id;
 pub const Meta = @import("Meta.zig");
