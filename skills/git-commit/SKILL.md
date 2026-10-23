@@ -40,6 +40,7 @@ built through it.
 1. Inspect the staged changes (git diff --staged) or all changes when nothing is staged.
 2. If the diff mixes unrelated multiple changes, suggest splitting it into separate commits.
 3. Pick the type and scope, then write the subject and, if needed, the body.
+4. Show the proposed commit message to the user and wait for approval before running `git commit`.
 
 ## Safety
 
