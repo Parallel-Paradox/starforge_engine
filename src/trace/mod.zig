@@ -1,5 +1,3 @@
-pub const super = @import("../root.zig");
-
 pub const Tracer = @import("tracer/Tracer.zig");
 pub const Subscriber = @import("subscriber/Subscriber.zig");
 pub const Trace = @import("Trace.zig");

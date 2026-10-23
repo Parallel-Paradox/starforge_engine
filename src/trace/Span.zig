@@ -6,11 +6,11 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Timestamp = std.Io.Timestamp;
 
-const root = @import("root.zig");
-const base = root.super.base;
-const Trace = root.Trace;
-const Event = root.Event;
-const Attribute = root.Attribute;
+const engine = @import("engine");
+const base = engine.base;
+const Trace = engine.trace.Trace;
+const Event = engine.trace.Event;
+const Attribute = engine.trace.Attribute;
 
 trace: Trace,
 id: Id,
@@ -151,7 +151,7 @@ pub fn linkTo(
 
 test "link records the target and its attributes" {
     const allocator = std.testing.allocator;
-    var default = root.Tracer.Default.init(allocator, std.testing.io);
+    var default = engine.trace.Tracer.Default.init(allocator, std.testing.io);
     defer default.deinit();
 
     const t = default.tracer();

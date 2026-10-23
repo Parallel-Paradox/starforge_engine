@@ -2,12 +2,12 @@
 
 const std = @import("std");
 
-const root = @import("root.zig");
-const Storage = root.Storage;
-const Mark = root.Mark;
+const mod = @import("mod.zig");
+const Storage = mod.Storage;
+const Mark = mod.Mark;
 
-const se = root.super.super;
-const reflect = se.reflect;
+const engine = @import("engine");
+const reflect = engine.reflect;
 const TypeId = reflect.TypeId;
 const TypeMeta = reflect.TypeMeta;
 
@@ -17,7 +17,7 @@ storage: Storage = .archetype,
 /// Builds the metadata of the component `T`.
 /// `T` must declare `pub const se_component: Mark = .{};`.
 pub fn of(comptime T: type) @This() {
-    if (comptime !root.isComponent(T)) @compileError(
+    if (comptime !mod.isComponent(T)) @compileError(
         @typeName(T) ++ " is not a component: declare pub const se_component: Mark = .{};",
     );
     return .{
@@ -106,10 +106,10 @@ test "eql compares the type and storage" {
 }
 
 test "isComponent detects the se_component declaration" {
-    try expect(root.isComponent(Position));
-    try expect(root.isComponent(Sparse));
-    try expect(!root.isComponent(u32));
-    try expect(!root.isComponent(Mark));
+    try expect(mod.isComponent(Position));
+    try expect(mod.isComponent(Sparse));
+    try expect(!mod.isComponent(u32));
+    try expect(!mod.isComponent(Mark));
 }
 
 test "callDeinit runs the managed deinit" {

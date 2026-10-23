@@ -3,8 +3,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const root = @import("root.zig");
-const TypeMeta = root.TypeMeta;
+const engine = @import("engine");
+const TypeMeta = engine.reflect.TypeMeta;
 
 meta: TypeMeta = .{},
 ptr: ?[*]u8 = null,

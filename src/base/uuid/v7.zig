@@ -1,9 +1,9 @@
 const std = @import("std");
 const Timestamp = std.Io.Timestamp;
 
-const root = @import("../root.zig");
-const random = root.random;
-const Uuid = root.Uuid;
+const engine = @import("engine");
+const random = engine.base.random;
+const Uuid = engine.base.Uuid;
 
 /// v7 features a time-ordered value field derived from the widely implemented and well-known
 /// Unix Epoch timestamp source, the number of milliseconds since midnight 1 Jan 1970 UTC, leap

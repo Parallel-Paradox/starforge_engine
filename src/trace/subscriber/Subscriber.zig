@@ -4,9 +4,9 @@ pub const Terminal = @import("Terminal.zig");
 
 const std = @import("std");
 
-const root = @import("../root.zig");
-const Span = root.Span;
-const Event = root.Event;
+const engine = @import("engine");
+const Span = engine.trace.Span;
+const Event = engine.trace.Event;
 
 ptr: *anyopaque,
 vtable: *const VTable,

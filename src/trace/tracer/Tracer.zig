@@ -6,12 +6,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const root = @import("../root.zig");
-const Subscriber = root.Subscriber;
-const Trace = root.Trace;
-const Span = root.Span;
-const Event = root.Event;
-const Attribute = root.Attribute;
+const engine = @import("engine");
+const Subscriber = engine.trace.Subscriber;
+const Trace = engine.trace.Trace;
+const Span = engine.trace.Span;
+const Event = engine.trace.Event;
+const Attribute = engine.trace.Attribute;
 
 ptr: *anyopaque,
 vtable: *const VTable,

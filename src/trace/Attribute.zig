@@ -4,8 +4,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
-const root = @import("root.zig");
-const String = root.super.base.String;
+const engine = @import("engine");
+const base = engine.base;
+const String = base.String;
 
 key: []const u8,
 value: Value,

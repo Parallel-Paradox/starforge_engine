@@ -2,8 +2,8 @@
 
 const std = @import("std");
 
-const root = @import("root.zig");
-const TypeId = root.TypeId;
+const engine = @import("engine");
+const TypeId = engine.reflect.TypeId;
 
 id: TypeId = .invalid,
 name: []const u8 = "",

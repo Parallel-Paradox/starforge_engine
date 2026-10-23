@@ -4,14 +4,14 @@ const Timestamp = std.Io.Timestamp;
 
 const builtin = @import("builtin");
 
-const root = @import("../root.zig");
-const Trace = root.Trace;
-const Span = root.Span;
-const Event = root.Event;
-const Attribute = root.Attribute;
-const Subscriber = root.Subscriber;
+const engine = @import("engine");
+const Trace = engine.trace.Trace;
+const Span = engine.trace.Span;
+const Event = engine.trace.Event;
+const Attribute = engine.trace.Attribute;
+const Subscriber = engine.trace.Subscriber;
 
-const base = root.super.base;
+const base = engine.base;
 const EpochTime = base.EpochTime;
 
 level_mask: LevelMask,

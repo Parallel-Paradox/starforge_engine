@@ -1,5 +1,3 @@
-pub const super = @import("../root.zig");
-
 pub const Parcel = @import("Parcel.zig");
 pub const Bundle = @import("Bundle.zig");
 pub const TypeId = @import("TypeId.zig");

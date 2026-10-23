@@ -2,10 +2,10 @@
 
 const std = @import("std");
 
-const root = @import("root.zig");
-const base = root.super.base;
-const Tracer = root.Tracer;
-const Span = root.Span;
+const engine = @import("engine");
+const base = engine.base;
+const Tracer = engine.trace.Tracer;
+const Span = engine.trace.Span;
 
 tracer: Tracer,
 id: Id,

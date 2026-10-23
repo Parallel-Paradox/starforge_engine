@@ -1,6 +1,6 @@
-pub const super = @import("../root.zig");
+pub const engine = @import("engine");
 
-pub const Id = super.Id;
+pub const Id = engine.ecs.Id;
 pub const Meta = @import("Meta.zig");
 pub const Registry = @import("Registry.zig");
 

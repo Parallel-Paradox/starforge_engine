@@ -6,10 +6,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Timestamp = std.Io.Timestamp;
 
-const root = @import("root.zig");
-const Trace = root.Trace;
-const Span = root.Span;
-const Attribute = root.Attribute;
+const engine = @import("engine");
+const Trace = engine.trace.Trace;
+const Span = engine.trace.Span;
+const Attribute = engine.trace.Attribute;
 
 trace: Trace,
 span_id: Span.Id,

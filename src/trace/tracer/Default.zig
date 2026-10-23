@@ -4,14 +4,14 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const root = @import("../root.zig");
-const base = root.super.base;
-const Tracer = root.Tracer;
-const Trace = root.Trace;
-const Span = root.Span;
-const Event = root.Event;
-const Subscriber = root.Subscriber;
-const Attribute = root.Attribute;
+const engine = @import("engine");
+const base = engine.base;
+const Tracer = engine.trace.Tracer;
+const Trace = engine.trace.Trace;
+const Span = engine.trace.Span;
+const Event = engine.trace.Event;
+const Subscriber = engine.trace.Subscriber;
+const Attribute = engine.trace.Attribute;
 const SubscriberList = Tracer.SubscriberList;
 const ResourceList = Tracer.ResourceList;
 

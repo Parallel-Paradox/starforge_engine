@@ -2,8 +2,8 @@
 
 const std = @import("std");
 
-const root = @import("root.zig");
-const NonZero = root.super.base.niche.NonZero;
+const engine = @import("engine");
+const NonZero = engine.base.niche.NonZero;
 
 val: NonZero(usize) = .invalid,
 

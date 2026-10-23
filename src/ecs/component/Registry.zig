@@ -3,12 +3,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const root = @import("root.zig");
-const CompId = root.Id;
-const CompMeta = root.Meta;
+const engine = @import("engine");
+const component = engine.ecs.component;
+const CompId = component.Id;
+const CompMeta = component.Meta;
+const CompMark = component.Mark;
 
-const se = root.super.super;
-const reflect = se.reflect;
+const reflect = engine.reflect;
 const TypeId = reflect.TypeId;
 
 pub const Entry = struct {
@@ -103,12 +104,12 @@ const expectEqual = std.testing.expectEqual;
 const expectError = std.testing.expectError;
 
 const U32 = struct {
-    pub const se_component: root.Mark = .{};
+    pub const se_component: CompMark = .{};
     value: u32,
 };
 
 const I32 = struct {
-    pub const se_component: root.Mark = .{};
+    pub const se_component: CompMark = .{};
     value: i32,
 };
 

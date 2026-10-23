@@ -3,9 +3,10 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const root = @import("root.zig");
-const TypeId = root.TypeId;
-const Parcel = root.Parcel;
+const engine = @import("engine");
+const reflect = engine.reflect;
+const TypeId = reflect.TypeId;
+const Parcel = reflect.Parcel;
 
 /// Declare `pub const se_bundle: Bundle.Mark = .{};` in a struct to mark it as a bundle.
 pub const Mark = struct {};

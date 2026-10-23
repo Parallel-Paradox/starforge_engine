@@ -1,8 +1,8 @@
 const std = @import("std");
 
-const root = @import("../root.zig");
-const random = root.random;
-const Uuid = root.Uuid;
+const engine = @import("engine");
+const random = engine.base.random;
+const Uuid = engine.base.Uuid;
 
 /// v4 is meant for generating id from truly random or pseudorandom numbers.
 /// Generate 128 bits of random data that is used to fill out the UUID fields, version and variant

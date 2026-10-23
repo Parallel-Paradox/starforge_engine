@@ -11,6 +11,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    mod.addImport("engine", mod);
 
     const test_suites = b.addTest(.{ .name = "test", .root_module = mod });
     const test_step = b.step("test", "Run all test suites");
