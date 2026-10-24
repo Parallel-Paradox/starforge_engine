@@ -121,7 +121,7 @@ test "init sorts columns and builds the lookup tables" {
     defer meta.deinit(allocator);
 
     // Alignment descending puts the widest type first, the zero-sized tag last.
-    try expectEqual(@as(usize, 3), meta.columns.items.len);
+    try expectEqual(3, meta.columns.items.len);
     try expectEqual(wide, meta.columns.items[0].id);
     try expectEqual(narrow, meta.columns.items[1].id);
     try expectEqual(tag, meta.columns.items[2].id);
@@ -134,9 +134,9 @@ test "init sorts columns and builds the lookup tables" {
     try expect(meta.signature.has(narrow));
     try expect(meta.signature.has(tag));
 
-    try expectEqual(@as(?usize, 0), meta.id_to_col.get(TypeId.of(Wide)));
-    try expectEqual(@as(?usize, 1), meta.id_to_col.get(TypeId.of(Narrow)));
-    try expectEqual(@as(?usize, 2), meta.id_to_col.get(TypeId.of(Tag)));
+    try expectEqual(0, meta.id_to_col.get(TypeId.of(Wide)));
+    try expectEqual(1, meta.id_to_col.get(TypeId.of(Narrow)));
+    try expectEqual(2, meta.id_to_col.get(TypeId.of(Tag)));
 
     try expectEqual(std.mem.Alignment.of(Wide), meta.alignment());
 }
@@ -176,8 +176,8 @@ test "init of no components has an empty layout" {
     var meta = try init(allocator, &.{}, registry);
     defer meta.deinit(allocator);
 
-    try expectEqual(@as(usize, 0), meta.columns.items.len);
-    try expectEqual(@as(usize, 0), meta.id_to_col.count());
-    try expectEqual(@as(usize, 0), meta.signature.mask.count());
+    try expectEqual(0, meta.columns.items.len);
+    try expectEqual(0, meta.id_to_col.count());
+    try expectEqual(0, meta.signature.mask.count());
     try expectEqual(std.mem.Alignment.@"1", meta.alignment());
 }

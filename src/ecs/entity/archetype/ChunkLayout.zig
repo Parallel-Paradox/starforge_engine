@@ -38,24 +38,39 @@ pub fn initWithCapacity(
     meta: Meta,
     capacity: usize,
 ) (Allocator.Error || Error)!@This() {
-    const alignment = meta.alignment();
     var self: @This() = .{
-        .capacity = capacity,
+        .capacity = 0,
         .size = 0,
-        .alignment = alignment,
+        .alignment = meta.alignment(),
         .column_offsets = .empty,
     };
     errdefer self.deinit(allocator);
 
-    try self.column_offsets.ensureTotalCapacity(allocator, meta.columns.items.len);
+    try self.resetCapacity(allocator, meta, capacity);
+    return self;
+}
 
+/// Rebuilds an existing layout in place to hold exactly `capacity` entities.
+///
+/// Reuses `column_offsets` storage when it is large enough. The layout is left
+/// unchanged if the new capacity does not fit.
+///
+/// # Errors
+///
+/// Returns `BufferTooLarge` if the computed buffer size exceeds max_size_byte.
+pub fn resetCapacity(
+    self: *@This(),
+    allocator: Allocator,
+    meta: Meta,
+    capacity: usize,
+) (Allocator.Error || Error)!void {
+    const alignment = meta.alignment();
+
+    // Validate the new layout first so a failure leaves the current one usable.
     var offset: usize = 0;
     for (meta.columns.items) |column| {
-        // Columns are sorted by alignment descending, so the previous column's
-        // size is already a multiple of this alignment and this is usually a no-op.
         offset = column.meta.alignment.forward(offset);
         if (offset > max_size_byte) return Error.BufferTooLarge;
-        self.column_offsets.appendAssumeCapacity(offset);
 
         const column_size = std.math.mul(usize, column.meta.size, capacity) catch
             return Error.BufferTooLarge;
@@ -65,9 +80,24 @@ pub fn initWithCapacity(
     }
 
     // Any padding left by the column layout goes at the tail of the buffer.
-    self.size = alignment.forward(offset);
-    if (self.size > max_size_byte) return Error.BufferTooLarge;
-    return self;
+    const size = alignment.forward(offset);
+    if (size > max_size_byte) return Error.BufferTooLarge;
+
+    try self.column_offsets.ensureTotalCapacity(allocator, meta.columns.items.len);
+    self.column_offsets.clearRetainingCapacity();
+
+    offset = 0;
+    for (meta.columns.items) |column| {
+        // Columns are sorted by alignment descending, so the previous column's
+        // size is already a multiple of this alignment and this is usually a no-op.
+        offset = column.meta.alignment.forward(offset);
+        self.column_offsets.appendAssumeCapacity(offset);
+        offset += column.meta.size * capacity;
+    }
+
+    self.capacity = capacity;
+    self.size = size;
+    self.alignment = alignment;
 }
 
 /// Builds a layout fitting within a `size`-byte budget, holding the largest
@@ -86,6 +116,33 @@ pub fn initWithSize(
     meta: Meta,
     size: usize,
 ) (Allocator.Error || Error)!@This() {
+    var self: @This() = .{
+        .capacity = 0,
+        .size = 0,
+        .alignment = meta.alignment(),
+        .column_offsets = .empty,
+    };
+    errdefer self.deinit(allocator);
+
+    try self.resetSize(allocator, meta, size);
+    return self;
+}
+
+/// Rebuilds an existing layout in place to fit within a `size`-byte budget,
+/// holding the largest capacity that fits.
+///
+/// The recorded `size` keeps the requested `size` exactly. The layout is left
+/// unchanged if the request does not fit.
+///
+/// # Errors
+///
+/// Returns `BufferTooLarge` if the requested size exceeds max_size_byte.
+pub fn resetSize(
+    self: *@This(),
+    allocator: Allocator,
+    meta: Meta,
+    size: usize,
+) (Allocator.Error || Error)!void {
     if (size > max_size_byte) return Error.BufferTooLarge;
 
     const budget = meta.alignment().backward(size);
@@ -111,9 +168,8 @@ pub fn initWithSize(
     else
         budget / element_size;
 
-    var self = try initWithCapacity(allocator, meta, capacity);
+    try self.resetCapacity(allocator, meta, capacity);
     self.size = size;
-    return self;
 }
 
 pub fn deinit(self: *@This(), allocator: Allocator) void {
@@ -229,4 +285,49 @@ test "initWithSize fits the largest capacity into the aligned budget" {
 
     // The requested size must fit the 16 KB limit.
     try expectError(Error.BufferTooLarge, initWithSize(allocator, meta, max_size_byte + 1));
+}
+
+test "resetCapacity rebuilds a layout in place and reuses its offsets" {
+    const allocator = std.testing.allocator;
+
+    var meta = try testMeta(allocator, &.{ Tag, Narrow, Wide });
+    defer meta.deinit(allocator);
+
+    var layout = try initWithCapacity(allocator, meta, 1);
+    defer layout.deinit(allocator);
+
+    const offsets_ptr = layout.column_offsets.items.ptr;
+    try layout.resetCapacity(allocator, meta, 10);
+    try expectLayout(layout, 10, 120, std.mem.Alignment.of(Wide), &.{ 0, 80, 120 });
+    try expectEqual(offsets_ptr, layout.column_offsets.items.ptr);
+
+    try layout.resetCapacity(allocator, meta, 0);
+    try expectLayout(layout, 0, 0, std.mem.Alignment.of(Wide), &.{ 0, 0, 0 });
+    try expectEqual(offsets_ptr, layout.column_offsets.items.ptr);
+
+    // A failed reset leaves the previous layout intact.
+    try expectError(Error.BufferTooLarge, layout.resetCapacity(allocator, meta, 1366));
+    try expectLayout(layout, 0, 0, std.mem.Alignment.of(Wide), &.{ 0, 0, 0 });
+}
+
+test "resetSize rebuilds a layout in place within a byte budget" {
+    const allocator = std.testing.allocator;
+
+    var meta = try testMeta(allocator, &.{ Tag, Narrow, Wide });
+    defer meta.deinit(allocator);
+
+    var layout = try initWithSize(allocator, meta, 100);
+    defer layout.deinit(allocator);
+
+    const offsets_ptr = layout.column_offsets.items.ptr;
+    try layout.resetSize(allocator, meta, 200);
+    try expectLayout(layout, 16, 200, std.mem.Alignment.of(Wide), &.{ 0, 128, 192 });
+    try expectEqual(offsets_ptr, layout.column_offsets.items.ptr);
+
+    try layout.resetSize(allocator, meta, 0);
+    try expectLayout(layout, 0, 0, std.mem.Alignment.of(Wide), &.{ 0, 0, 0 });
+
+    // A failed reset leaves the previous layout intact.
+    try expectError(Error.BufferTooLarge, layout.resetSize(allocator, meta, max_size_byte + 1));
+    try expectLayout(layout, 0, 0, std.mem.Alignment.of(Wide), &.{ 0, 0, 0 });
 }

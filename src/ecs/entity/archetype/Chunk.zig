@@ -32,8 +32,22 @@ pub fn init(
     };
 }
 
-/// Frees the chunk's buffer and clears its entity count.
+/// Runs the `deinit` of every live managed component, frees the chunk's buffer and
+/// clears its entity count.
 pub fn deinit(self: *@This(), allocator: Allocator) void {
+    // Destroy each column before releasing the buffer that holds its values.
+    for (self.meta.columns.items, self.layout.column_offsets.items) |column, offset| {
+        switch (column.meta.need_deinit) {
+            .trivial => {},
+            .managed => |deinit_fn| {
+                for (0..self.len) |index| {
+                    const ptr = self.ptr + offset + index * column.meta.size;
+                    deinit_fn(@ptrCast(ptr));
+                }
+            },
+        }
+    }
+
     var buffer: AlignedBuffer = .{
         .ptr = if (self.layout.size == 0) null else self.ptr,
         .len = self.layout.size,
@@ -69,14 +83,14 @@ test "init allocates the layout buffer and deinit frees it" {
     var chunk = try init(allocator, &meta, &layout);
     defer chunk.deinit(allocator);
 
-    try expect(chunk.meta == &meta);
-    try expect(chunk.layout == &layout);
-    try expectEqual(@as(usize, 0), chunk.len);
+    try expectEqual(chunk.meta, &meta);
+    try expectEqual(chunk.layout, &layout);
+    try expectEqual(0, chunk.len);
     try expect(layout.alignment.check(@intFromPtr(chunk.ptr)));
 
     // The whole layout, including tail padding, is writable.
     @memset(chunk.ptr[0..layout.size], 0xAB);
-    for (chunk.ptr[0..layout.size]) |byte| try expectEqual(@as(u8, 0xAB), byte);
+    for (chunk.ptr[0..layout.size]) |byte| try expectEqual(0xAB, byte);
 }
 
 test "init does not allocate a zero-sized layout" {
@@ -92,7 +106,49 @@ test "init does not allocate a zero-sized layout" {
     var chunk = try init(allocator, &meta, &layout);
     defer chunk.deinit(allocator);
 
-    try expectEqual(@as(usize, 0), layout.size);
-    try expectEqual(@as(usize, 0), chunk.len);
+    try expectEqual(0, layout.size);
+    try expectEqual(0, chunk.len);
     try expect(layout.alignment.check(@intFromPtr(chunk.ptr)));
+}
+
+test "deinit runs managed component deinit for every live entity" {
+    const allocator = std.testing.allocator;
+    const TypeId = engine.reflect.TypeId;
+
+    const Managed = struct {
+        pub const se_component: CompMark = .{};
+        calls: *usize,
+
+        pub fn deinit(self: *@This()) void {
+            self.calls.* += 1;
+        }
+    };
+
+    var registry = CompRegistry.init(allocator);
+    defer registry.deinit();
+    const managed = try registry.register(Managed);
+
+    var meta = try Meta.init(allocator, &.{managed}, registry);
+    defer meta.deinit(allocator);
+    var layout = try Layout.initWithCapacity(allocator, meta, 4);
+    defer layout.deinit(allocator);
+
+    var calls: usize = 0;
+    {
+        var chunk = try init(allocator, &meta, &layout);
+        defer chunk.deinit(allocator);
+
+        chunk.len = 3;
+        const column = meta.id_to_col.get(TypeId.of(Managed)).?;
+        const offset = layout.column_offsets.items[column];
+        for (0..chunk.len) |index| {
+            const value: *Managed = @ptrCast(@alignCast(
+                chunk.ptr + offset + index * @sizeOf(Managed),
+            ));
+            value.* = .{ .calls = &calls };
+        }
+    }
+
+    // Only the live entities are destroyed; the unused slot is untouched.
+    try expectEqual(3, calls);
 }
