@@ -40,6 +40,19 @@ pub fn init(allocator: Allocator, meta: TypeMeta) Allocator.Error!@This() {
     };
 }
 
+/// Creates an empty sparse set with room for at least `requested` entities.
+pub fn initWithCapacity(
+    allocator: Allocator,
+    meta: TypeMeta,
+    requested: usize,
+) Allocator.Error!@This() {
+    var self = try init(allocator, meta);
+    errdefer self.deinit();
+
+    try self.reserve(requested);
+    return self;
+}
+
 /// Runs the `deinit` of every live managed component, then frees the dense data
 /// buffer and both index arrays.
 pub fn deinit(self: *@This()) void {
@@ -53,9 +66,7 @@ pub fn deinit(self: *@This()) void {
         },
     }
 
-    // `entity_ids.capacity` is the dense capacity, so the dense buffer occupies
-    // exactly this many bytes. Rebuild the descriptor to hand it to the allocator.
-    const dense_size = self.entity_ids.capacity * self.meta.size;
+    const dense_size = self.capacity() * self.meta.size;
     var buffer: AlignedBuffer = if (dense_size == 0)
         .empty(self.meta.alignment)
     else
@@ -70,8 +81,45 @@ pub fn deinit(self: *@This()) void {
     self.entity_ids.deinit(self.allocator);
 }
 
+/// Ensures the dense buffer can hold at least `additional` more elements beyond
+/// `self.len()`, growing the allocation by doubling if needed.
+pub fn reserve(self: *@This(), additional: usize) Allocator.Error!void {
+    const required = std.math.add(usize, self.len(), additional) catch
+        return error.OutOfMemory;
+    const old_capacity = self.capacity();
+    if (required <= old_capacity) return;
+
+    var new_capacity = if (old_capacity == 0) required else old_capacity;
+    while (new_capacity < required) new_capacity = new_capacity *| 2;
+
+    const old_size = old_capacity * self.meta.size;
+    const live_size = self.len() * self.meta.size;
+    const new_size = std.math.mul(usize, new_capacity, self.meta.size) catch
+        return error.OutOfMemory;
+
+    const allocator = self.allocator;
+    var new_buffer = try AlignedBuffer.init(allocator, new_size, self.meta.alignment);
+    errdefer new_buffer.deinit(allocator);
+
+    // Values move with their bytes and are not destroyed during relocation.
+    if (live_size != 0) @memcpy(new_buffer.ptr[0..live_size], self.ptr[0..live_size]);
+
+    // Grow the ids to exactly the capacity covered by the new buffer, so
+    // `capacity()` and the allocation length stay in sync.
+    try self.entity_ids.ensureTotalCapacityPrecise(allocator, new_capacity);
+
+    var old_buffer: AlignedBuffer = if (old_size == 0)
+        .empty(self.meta.alignment)
+    else
+        .{ .ptr = self.ptr, .len = old_size, .alignment = self.meta.alignment };
+    old_buffer.deinit(allocator);
+
+    self.ptr = new_buffer.ptr;
+}
+
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+const expectEqualSlices = std.testing.expectEqualSlices;
 
 test "init creates an empty sparse set and deinit frees its arrays" {
     const allocator = std.testing.allocator;
@@ -89,18 +137,54 @@ test "init creates an empty sparse set and deinit frees its arrays" {
     try set.sparse_to_dense.ensureTotalCapacity(allocator, 4);
 }
 
-test "init does not allocate dense storage for a zero-sized type" {
+test "initWithCapacity reserves an aligned dense buffer" {
     const allocator = std.testing.allocator;
-    const Tag = struct {};
+    const meta = TypeMeta.of(u64);
 
-    var set = try init(allocator, TypeMeta.of(Tag));
+    var set = try initWithCapacity(allocator, meta, 3);
     defer set.deinit();
 
     try expectEqual(0, set.len());
-    try expectEqual(0, set.capacity());
+    try expectEqual(3, set.capacity());
+    try expect(meta.alignment.check(@intFromPtr(set.ptr)));
+
+    // The whole reserved range is writable.
+    const bytes = set.capacity() * meta.size;
+    @memset(set.ptr[0..bytes], 0xAB);
+    for (set.ptr[0..bytes]) |byte| try expectEqual(0xAB, byte);
 }
 
-test "deinit destroys live managed components and frees the dense buffer" {
+test "reserve doubles capacity, preserves values, and skips needless growth" {
+    const allocator = std.testing.allocator;
+    const meta = TypeMeta.of(u32);
+
+    var set = try initWithCapacity(allocator, meta, 2);
+    defer set.deinit();
+
+    set.entity_ids.appendAssumeCapacity(EntityId.init(0, 1));
+    set.entity_ids.appendAssumeCapacity(EntityId.init(1, 1));
+
+    const old_ptr = set.ptr;
+    const values: [*]u32 = @ptrCast(@alignCast(set.ptr));
+    values[0] = 7;
+    values[1] = 9;
+
+    try set.reserve(1);
+
+    try expectEqual(4, set.capacity());
+    try expectEqual(2, set.len());
+    try expect(set.ptr != old_ptr);
+    const grown: [*]u32 = @ptrCast(@alignCast(set.ptr));
+    try expectEqualSlices(u32, &[_]u32{ 7, 9 }, grown[0..2]);
+
+    // One more element still fits in the doubled capacity; no reallocation.
+    const grown_ptr = set.ptr;
+    try set.reserve(1);
+    try expectEqual(4, set.capacity());
+    try expectEqual(grown_ptr, set.ptr);
+}
+
+test "reserve relocates managed values and deinit destroys every live value" {
     const allocator = std.testing.allocator;
 
     const Managed = struct {
@@ -114,24 +198,49 @@ test "deinit destroys live managed components and frees the dense buffer" {
     const meta = TypeMeta.of(Managed);
     var calls: usize = 0;
 
-    var set = try init(allocator, meta);
-    // Grow the dense arrays the way `reserve` will: reserve the arrays first,
-    // then size the data buffer to the resulting dense capacity.
-    try set.sparse_to_dense.ensureTotalCapacity(allocator, 3);
-    try set.entity_ids.ensureTotalCapacity(allocator, 3);
-    const buffer = try AlignedBuffer.init(
-        allocator,
-        set.capacity() * meta.size,
-        meta.alignment,
-    );
-    set.ptr = buffer.ptr;
+    {
+        var set = try initWithCapacity(allocator, meta, 1);
+        defer set.deinit();
 
-    set.entity_ids.items.len = 3;
-    for (0..set.len()) |index| {
-        const value: *Managed = @ptrCast(@alignCast(set.ptr + index * meta.size));
-        value.* = .{ .calls = &calls };
+        set.entity_ids.appendAssumeCapacity(EntityId.init(0, 1));
+        const first: *Managed = @ptrCast(@alignCast(set.ptr));
+        first.* = .{ .calls = &calls };
+
+        try set.reserve(1);
+        try expectEqual(2, set.capacity());
+
+        // The old buffer was released without destroying the moved value.
+        try expectEqual(0, calls);
+        const moved: *Managed = @ptrCast(@alignCast(set.ptr));
+        try expectEqual(&calls, moved.calls);
+
+        set.entity_ids.appendAssumeCapacity(EntityId.init(1, 1));
+        const second: *Managed = @ptrCast(@alignCast(set.ptr + meta.size));
+        second.* = .{ .calls = &calls };
     }
 
-    set.deinit();
-    try expectEqual(3, calls);
+    // deinit destroys both the relocated value and the later one.
+    try expectEqual(2, calls);
+}
+
+test "initWithCapacity grows zero-sized types without a dense allocation" {
+    const allocator = std.testing.allocator;
+    const Tag = struct {};
+
+    const meta = TypeMeta.of(Tag);
+    var set = try initWithCapacity(allocator, meta, 4);
+    defer set.deinit();
+
+    try expectEqual(0, set.len());
+    try expectEqual(4, set.capacity());
+    try expect(meta.alignment.check(@intFromPtr(set.ptr)));
+
+    for (0..4) |index| {
+        set.entity_ids.appendAssumeCapacity(EntityId.init(@intCast(index), 1));
+    }
+    try set.reserve(1);
+
+    try expectEqual(8, set.capacity());
+    try expectEqual(4, set.len());
+    try expect(meta.alignment.check(@intFromPtr(set.ptr)));
 }
