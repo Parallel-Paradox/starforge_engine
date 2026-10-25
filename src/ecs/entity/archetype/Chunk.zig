@@ -27,8 +27,7 @@ pub fn init(
     return .{
         .meta = meta,
         .layout = layout,
-        // Zero-sized layouts are never allocated; use a non-null, aligned sentinel.
-        .ptr = buffer.ptr orelse @ptrFromInt(layout.alignment.toByteUnits()),
+        .ptr = buffer.ptr,
     };
 }
 
@@ -48,11 +47,14 @@ pub fn deinit(self: *@This(), allocator: Allocator) void {
         }
     }
 
-    var buffer: AlignedBuffer = .{
-        .ptr = if (self.layout.size == 0) null else self.ptr,
-        .len = self.layout.size,
-        .alignment = self.layout.alignment,
-    };
+    var buffer: AlignedBuffer = if (self.layout.size == 0)
+        .empty(self.layout.alignment)
+    else
+        .{
+            .ptr = self.ptr,
+            .len = self.layout.size,
+            .alignment = self.layout.alignment,
+        };
     buffer.deinit(allocator);
     self.len = 0;
 }
