@@ -19,7 +19,7 @@ const TypeMeta = reflect.TypeMeta;
 columns: std.ArrayList(Entry),
 signature: Signature,
 /// TypeId -> column index.
-id_to_col: std.AutoHashMap(TypeId, usize),
+id_to_col: std.AutoHashMapUnmanaged(TypeId, usize) = .empty,
 
 pub const Entry = struct {
     id: CompId,
@@ -54,7 +54,6 @@ pub fn init(
     var self: @This() = .{
         .columns = .empty,
         .signature = Signature.init(allocator),
-        .id_to_col = .init(allocator),
     };
     errdefer self.deinit(allocator);
 
@@ -65,7 +64,7 @@ pub fn init(
     }
     std.mem.sort(Entry, self.columns.items, {}, Entry.lessThan);
 
-    try self.id_to_col.ensureTotalCapacity(@intCast(self.columns.items.len));
+    try self.id_to_col.ensureTotalCapacity(allocator, @intCast(self.columns.items.len));
     for (self.columns.items, 0..) |column, index| {
         self.id_to_col.putAssumeCapacityNoClobber(column.meta.id, index);
     }
@@ -78,7 +77,7 @@ pub fn init(
 pub fn deinit(self: *@This(), allocator: Allocator) void {
     self.columns.deinit(allocator);
     self.signature.deinit(allocator);
-    self.id_to_col.deinit();
+    self.id_to_col.deinit(allocator);
 }
 
 /// The alignment of the archetype buffer: the first column's alignment, since
