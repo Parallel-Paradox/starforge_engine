@@ -7,8 +7,11 @@ const NonMax = engine.base.niche.NonMax;
 
 pub const invalid = @This(){};
 
-index: NonMax(u32) = .invalid,
-generation: NonMax(u32) = .invalid,
+pub const Index = NonMax(u32);
+pub const Generation = NonMax(u32);
+
+index: Index = .invalid,
+generation: Generation = .invalid,
 
 /// Builds an id from raw values. Asserts (in safe build modes) that neither value is `maxInt(u32)`.
 pub fn init(index: u32, generation: u32) @This() {
