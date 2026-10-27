@@ -89,10 +89,10 @@ test "addEntity registers components and creates an entity" {
         Health{ .value = 7 },
     });
 
-    const position_id = try world.entity_reg.comp_reg.register(Position);
-    const health_id = try world.entity_reg.comp_reg.register(Health);
+    const position_id = world.entity_reg.comp_reg.getByType(Position).?;
+    const health_id = world.entity_reg.comp_reg.getByType(Health).?;
 
-    const created = &world.entity_reg.entities.items[id.index.get()];
+    const created = world.entity_reg.get(id).?;
     try expect(created.id.eql(id));
     try expect(created.signature.has(position_id));
     try expect(created.signature.has(health_id));

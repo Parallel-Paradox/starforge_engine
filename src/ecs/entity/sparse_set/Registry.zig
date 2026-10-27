@@ -36,6 +36,17 @@ pub fn deinit(self: *@This()) void {
     self.retired.deinit(self.allocator);
 }
 
+/// Returns the sparse set registered for `id`, or null if it is unknown.
+/// The pointer is invalidated when another sparse set is registered.
+pub fn get(self: *@This(), id: SparseSetId) ?*SparseSet {
+    const index = id.index.tryGet() orelse return null;
+    if (index >= self.entries.items.len) return null;
+
+    const entry = &self.entries.items[index];
+    if (!entry.id.eql(id)) return null;
+    return &entry.set;
+}
+
 /// Returns the entry for the sparse set of `meta`, creating and registering it when needed.
 /// The pointer is invalidated when another sparse set is registered.
 pub fn getOrCreate(self: *@This(), meta: TypeMeta) Allocator.Error!*Entry {
@@ -104,4 +115,18 @@ test "getOrCreate reuses a set per component type" {
     try expect(!first_id.eql(other.id));
     try expect(other.set.meta.eql(TypeMeta.of(i32)));
     try expectEqual(2, registry.entries.items.len);
+}
+
+test "get returns a registered set and rejects unknown ids" {
+    const allocator = std.testing.allocator;
+    var registry = init(allocator);
+    defer registry.deinit();
+
+    const entry = try registry.getOrCreate(TypeMeta.of(u32));
+    const set = registry.get(entry.id).?;
+    try expect(set.meta.eql(TypeMeta.of(u32)));
+
+    try expect(registry.get(SparseSetId.init(0, 1)) == null);
+    try expect(registry.get(SparseSetId.init(1, 0)) == null);
+    try expect(registry.get(SparseSetId.invalid) == null);
 }

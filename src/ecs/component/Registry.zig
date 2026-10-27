@@ -83,6 +83,16 @@ pub fn unregister(self: *@This(), type_id: TypeId) Allocator.Error!void {
     });
 }
 
+/// Returns the component id registered for `T`, or null if it is unknown.
+pub fn getByType(self: *const @This(), comptime T: type) ?CompId {
+    return self.getById(TypeId.of(T));
+}
+
+/// Returns the component id registered for `type_id`, or null if it is unknown.
+pub fn getById(self: *const @This(), type_id: TypeId) ?CompId {
+    return self.type_to_id.get(type_id);
+}
+
 /// Returns the metadata registered for `comp_id`, or null if it is unknown.
 pub fn getMeta(self: *const @This(), comp_id: CompId) ?CompMeta {
     const index: usize = comp_id.index.tryGet() orelse return null;
@@ -95,7 +105,7 @@ pub fn getMeta(self: *const @This(), comp_id: CompId) ?CompMeta {
 
 /// Returns the metadata registered for `type_id`, or null if it is unknown.
 pub fn getMetaByType(self: *const @This(), type_id: TypeId) ?CompMeta {
-    const comp_id = self.type_to_id.get(type_id) orelse return null;
+    const comp_id = self.getById(type_id) orelse return null;
     return self.getMeta(comp_id);
 }
 
@@ -177,4 +187,21 @@ test "registerMeta rejects conflicting metadata" {
     conflicting.storage = .sparse_set;
 
     try expectError(Error.ConflictingMeta, registry.registerMeta(conflicting));
+}
+
+test "getByType and getById look up component ids" {
+    var registry = init(std.testing.allocator);
+    defer registry.deinit();
+
+    const id = try registry.register(U32);
+    try expect(id.eql(registry.getByType(U32).?));
+    try expect(id.eql(registry.getById(TypeId.of(U32)).?));
+
+    try expect(registry.getByType(I32) == null);
+    try expect(registry.getById(TypeId.of(I32)) == null);
+    try expect(registry.getById(TypeId.invalid) == null);
+
+    try registry.unregister(TypeId.of(U32));
+    try expect(registry.getByType(U32) == null);
+    try expect(registry.getById(TypeId.of(U32)) == null);
 }

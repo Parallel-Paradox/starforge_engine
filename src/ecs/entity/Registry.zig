@@ -49,6 +49,17 @@ pub fn deinit(self: *@This()) void {
     self.comp_reg.deinit();
 }
 
+/// Returns the entity registered for `id`, or null if it is unknown or retired.
+/// The pointer is invalidated when another entity is created.
+pub fn get(self: *@This(), id: EntityId) ?*Entity {
+    const index = id.index.tryGet() orelse return null;
+    if (index >= self.entities.items.len) return null;
+
+    const entity = &self.entities.items[index];
+    if (!entity.id.eql(id)) return null;
+    return entity;
+}
+
 pub const Error = Allocator.Error || ecs.entity.archetype.ChunkLayout.Error || error{
     UnknownComponentType,
 };
@@ -110,7 +121,7 @@ fn splitByStorage(
     for (parcels) |parcel| {
         const meta = self.comp_reg.getMetaByType(parcel.meta.id) orelse
             return Error.UnknownComponentType;
-        const comp_id = self.comp_reg.type_to_id.get(parcel.meta.id).?;
+        const comp_id = self.comp_reg.getById(parcel.meta.id).?;
         switch (meta.storage) {
             .archetype => {
                 ids[archetype_end] = comp_id;
@@ -168,7 +179,7 @@ fn reserveStorage(
 
     const allocator = self.allocator;
     for (sparse_ids) |sparse_id| {
-        const set = &self.sparse_reg.entries.items[sparse_id.index.get()].set;
+        const set = self.sparse_reg.get(sparse_id).?;
         try set.reserve(1);
         try set.sparse_to_dense.ensureTotalCapacity(allocator, id.index.get() + 1);
         while (set.sparse_to_dense.items.len <= id.index.get())
@@ -237,7 +248,7 @@ fn storeSparseComponents(
         if (meta.storage != .sparse_set) continue;
 
         // Pair the reverse sparse suffix with parcels walked from the end.
-        const set = &self.sparse_reg.entries.items[sparse_ids[index].index.get()].set;
+        const set = self.sparse_reg.get(sparse_ids[index]).?;
         const dense_index = set.len();
         if (set.meta.size != 0) {
             const dest = set.ptr + dense_index * set.meta.size;
@@ -308,9 +319,13 @@ test "addBundle stores components and reuses archetype and sparse storage" {
     var registry = init(allocator);
     defer registry.deinit();
 
-    const position_id = try registry.comp_reg.register(Position);
-    const velocity_id = try registry.comp_reg.register(Velocity);
-    const health_id = try registry.comp_reg.register(Health);
+    _ = try registry.comp_reg.register(Position);
+    _ = try registry.comp_reg.register(Velocity);
+    _ = try registry.comp_reg.register(Health);
+
+    const position_id = registry.comp_reg.getByType(Position).?;
+    const velocity_id = registry.comp_reg.getByType(Velocity).?;
+    const health_id = registry.comp_reg.getByType(Health).?;
 
     const first = try registry.addBundle(try .init(allocator, .{
         Position{ .x = 3, .y = 4 },
@@ -329,8 +344,8 @@ test "addBundle stores components and reuses archetype and sparse storage" {
     try expectEqual(1, registry.arch_reg.entries.items.len);
     try expectEqual(1, registry.sparse_reg.entries.items.len);
 
-    const first_entity = &registry.entities.items[first.index.get()];
-    const second_entity = &registry.entities.items[second.index.get()];
+    const first_entity = registry.get(first).?;
+    const second_entity = registry.get(second).?;
     try expect(first_entity.id.eql(first));
     try expect(first_entity.signature.has(position_id));
     try expect(first_entity.signature.has(velocity_id));
@@ -354,15 +369,13 @@ test "addBundle stores components and reuses archetype and sparse storage" {
     try expectArchetypeValue(archetype, Velocity, 0, .{ .dx = 1, .dy = 2 });
     try expectArchetypeValue(archetype, Velocity, 1, .{ .dx = 3, .dy = 4 });
 
-    const sparse_entry = registry.sparse_reg.entries.items[
-        first_entity.sparse_comps.items[0].index.get()
-    ];
-    try expect(sparse_entry.id.eql(first_entity.sparse_comps.items[0]));
-    try expectEqual(2, sparse_entry.set.len());
-    try expectEqual(0, sparse_entry.set.sparse_to_dense.items[first.index.get()].get());
-    try expectEqual(1, sparse_entry.set.sparse_to_dense.items[second.index.get()].get());
+    const sparse_id = first_entity.sparse_comps.items[0];
+    const sparse_set = registry.sparse_reg.get(sparse_id).?;
+    try expectEqual(2, sparse_set.len());
+    try expectEqual(0, sparse_set.sparse_to_dense.items[first.index.get()].get());
+    try expectEqual(1, sparse_set.sparse_to_dense.items[second.index.get()].get());
 
-    const healths: [*]Health = @ptrCast(@alignCast(sparse_entry.set.ptr));
+    const healths: [*]Health = @ptrCast(@alignCast(sparse_set.ptr));
     try expectEqual(11, healths[0].value);
     try expectEqual(22, healths[1].value);
 }
@@ -377,7 +390,7 @@ test "addBundle accepts an empty bundle" {
     try expectEqual(1, registry.entities.items.len);
     try expectEqual(1, registry.arch_reg.entries.items.len);
 
-    const entity = &registry.entities.items[id.index.get()];
+    const entity = registry.get(id).?;
     try expectEqual(0, entity.signature.mask.count());
 
     const archetype = registry.arch_reg.get(entity.archetype_id).?;
@@ -435,12 +448,13 @@ test "addBundle matches each sparse component to its own set" {
         Mana{ .value = 22 },
     }));
 
-    try expectEqual(2, registry.entities.items[id.index.get()].sparse_comps.items.len);
+    const entity = registry.get(id).?;
+    try expectEqual(2, entity.sparse_comps.items.len);
 
     const health_set_id = registry.sparse_reg.type_to_id.get(TypeId.of(Health)).?;
     const mana_set_id = registry.sparse_reg.type_to_id.get(TypeId.of(Mana)).?;
-    const health_set = &registry.sparse_reg.entries.items[health_set_id.index.get()].set;
-    const mana_set = &registry.sparse_reg.entries.items[mana_set_id.index.get()].set;
+    const health_set = registry.sparse_reg.get(health_set_id).?;
+    const mana_set = registry.sparse_reg.get(mana_set_id).?;
 
     const health: *Health = @ptrCast(@alignCast(health_set.ptr));
     const mana: *Mana = @ptrCast(@alignCast(mana_set.ptr));
@@ -452,7 +466,8 @@ test "addBundle reuses a retired entity slot" {
     const allocator = std.testing.allocator;
     var registry = init(allocator);
     defer registry.deinit();
-    const position_id = try registry.comp_reg.register(Position);
+    _ = try registry.comp_reg.register(Position);
+    const position_id = registry.comp_reg.getByType(Position).?;
 
     const first = try registry.addBundle(try .init(allocator, .{
         Position{ .x = 1, .y = 2 },
@@ -462,7 +477,7 @@ test "addBundle reuses a retired entity slot" {
         first.generation.next().get(),
     );
 
-    const slot = &registry.entities.items[first.index.get()];
+    const slot = registry.get(first).?;
     slot.deinit(allocator);
     slot.id = EntityId.invalid;
     try registry.retired.append(allocator, retired_id);
@@ -475,11 +490,31 @@ test "addBundle reuses a retired entity slot" {
     try expectEqual(0, registry.retired.items.len);
     try expectEqual(1, registry.entities.items.len);
 
-    const entity = &registry.entities.items[second.index.get()];
+    const entity = registry.get(second).?;
     try expect(entity.id.eql(retired_id));
     try expect(entity.signature.has(position_id));
     try expectEqual(1, entity.archetype_row);
 
     const archetype = registry.arch_reg.get(entity.archetype_id).?;
     try expectArchetypeValue(archetype, Position, 1, .{ .x = 3, .y = 4 });
+}
+
+test "get returns a live entity and rejects unknown ids" {
+    const allocator = std.testing.allocator;
+    var registry = init(allocator);
+    defer registry.deinit();
+    _ = try registry.comp_reg.register(Position);
+
+    const first = try registry.addBundle(try .init(allocator, .{
+        Position{ .x = 1, .y = 2 },
+    }));
+    const second = try registry.addBundle(try .init(allocator, .{
+        Position{ .x = 3, .y = 4 },
+    }));
+
+    try expect(registry.get(first).?.id.eql(first));
+    try expect(registry.get(second).?.id.eql(second));
+    try expect(registry.get(EntityId.init(0, first.generation.next().get())) == null);
+    try expect(registry.get(EntityId.init(2, 0)) == null);
+    try expect(registry.get(EntityId.invalid) == null);
 }
