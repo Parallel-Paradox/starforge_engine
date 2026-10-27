@@ -57,6 +57,12 @@ pub fn init(allocator: Allocator, value: anytype) Allocator.Error!@This() {
     return .{ .meta = meta, .ptr = ptr };
 }
 
+/// The stored value's bytes, or an empty slice when the parcel is empty.
+pub fn bytes(self: *const @This()) []u8 {
+    const ptr = self.ptr orelse return &.{};
+    return ptr[0..self.meta.size];
+}
+
 /// Runs the value's deinit if it needs one, frees its storage, and resets to empty.
 pub fn deinit(self: *@This(), allocator: Allocator) void {
     if (self.ptr) |ptr| {
@@ -93,6 +99,7 @@ fn freeStorage(self: *@This(), allocator: Allocator) void {
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+const expectEqualSlices = std.testing.expectEqualSlices;
 
 const Probe = struct {
     calls: *usize,
@@ -116,6 +123,7 @@ test "init stores values under their storage type" {
     try expect(typed.meta.eql(TypeMeta.of(u64)));
     try expectEqual(@sizeOf(u64), typed.meta.size);
     try expectStored(typed, u64, 42);
+    try expectEqualSlices(u8, std.mem.asBytes(&stored), typed.bytes());
 
     var integer = try init(allocator, 42);
     defer integer.deinit(allocator);
@@ -144,10 +152,11 @@ test "deinit runs the value's deinit, releaseStorage only frees storage" {
     const allocator = std.testing.allocator;
     var calls: usize = 0;
 
-    var deinited = try init(allocator, Probe{ .calls = &calls });
-    deinited.deinit(allocator);
+    var disposed = try init(allocator, Probe{ .calls = &calls });
+    disposed.deinit(allocator);
     try expectEqual(1, calls);
-    try expect(deinited.ptr == null);
+    try expect(disposed.ptr == null);
+    try expectEqual(0, disposed.bytes().len);
 
     var released = try init(allocator, Probe{ .calls = &calls });
     released.releaseStorage(allocator);
@@ -180,6 +189,7 @@ test "zero-size value owns no memory but still runs its deinit" {
     };
 
     var parcel = try init(allocator, Empty{});
+    try expectEqual(0, parcel.bytes().len);
     parcel.deinit(allocator);
 
     try expectEqual(1, Empty.calls);

@@ -17,7 +17,7 @@ pub const Entry = struct {
     meta: CompMeta = .{},
 };
 
-pub const RegisterError = Allocator.Error || error{
+pub const Error = Allocator.Error || error{
     /// The type is already registered with different metadata.
     ConflictingMeta,
 };
@@ -38,16 +38,16 @@ pub fn deinit(self: *@This()) void {
 }
 
 /// Registers `T` and returns its component id, or the existing one.
-pub fn register(self: *@This(), comptime T: type) RegisterError!CompId {
+pub fn register(self: *@This(), comptime T: type) Error!CompId {
     return self.registerMeta(CompMeta.of(T));
 }
 
 /// Registers `meta` and returns its component id, or the existing one.
-pub fn registerMeta(self: *@This(), meta: CompMeta) RegisterError!CompId {
+pub fn registerMeta(self: *@This(), meta: CompMeta) Error!CompId {
     const type_id = meta.typeId();
     if (self.type_to_id.get(type_id)) |id| {
         if (!self.entries.items[id.index.get()].meta.eql(meta)) {
-            return RegisterError.ConflictingMeta;
+            return Error.ConflictingMeta;
         }
         return id;
     }
@@ -60,7 +60,7 @@ pub fn registerMeta(self: *@This(), meta: CompMeta) RegisterError!CompId {
         return id;
     }
 
-    const id = CompId.init(@intCast(self.entries.items.len), 1);
+    const id = CompId.init(@intCast(self.entries.items.len), 0);
     try self.entries.ensureUnusedCapacity(self.allocator, 1);
     try self.type_to_id.ensureUnusedCapacity(self.allocator, 1);
 
@@ -122,7 +122,7 @@ test "register assigns one id per type" {
 
     try expectEqual(0, first.index.get());
     try expectEqual(1, second.index.get());
-    try expectEqual(1, first.generation.get());
+    try expectEqual(0, first.generation.get());
 
     try expect(first.eql(try registry.register(U32)));
     try expect(first.eql(try registry.registerMeta(CompMeta.of(U32))));
@@ -176,5 +176,5 @@ test "registerMeta rejects conflicting metadata" {
     var conflicting = meta;
     conflicting.storage = .sparse_set;
 
-    try expectError(RegisterError.ConflictingMeta, registry.registerMeta(conflicting));
+    try expectError(Error.ConflictingMeta, registry.registerMeta(conflicting));
 }

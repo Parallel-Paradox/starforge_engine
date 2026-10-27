@@ -66,7 +66,7 @@ pub fn init(allocator: Allocator, fields: anytype) Allocator.Error!@This() {
 
 /// Frees every parcel's storage and the map without running the values' deinit, returning
 /// their ownership to the caller.
-fn releaseStorage(self: *@This()) void {
+pub fn releaseStorage(self: *@This()) void {
     for (self.map.values()) |*parcel| parcel.releaseStorage(self.allocator);
     self.map.deinit(self.allocator);
     self.map = .{};
@@ -99,7 +99,7 @@ fn flatCount(comptime T: type) usize {
 }
 
 /// The flattened field types of `T` in traversal order.
-fn flatTypes(comptime T: type) [flatCount(T)]type {
+pub fn flatTypes(comptime T: type) [flatCount(T)]type {
     var types: [flatCount(T)]type = undefined;
     var index: usize = 0;
     fillFlatTypes(T, &types, &index);
