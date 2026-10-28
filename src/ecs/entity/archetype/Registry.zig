@@ -42,13 +42,25 @@ pub fn deinit(self: *@This()) void {
 
 /// Returns the archetype registered for `id`, or null if it is unknown.
 /// The pointer is invalidated when another archetype is registered.
-pub fn get(self: *@This(), id: ArchetypeId) ?*Archetype {
+pub fn getById(self: *@This(), id: ArchetypeId) ?*Archetype {
     const index = id.index.tryGet() orelse return null;
     if (index >= self.entries.items.len) return null;
 
     const entry = &self.entries.items[index];
     if (!entry.id.eql(id)) return null;
     return &entry.archetype;
+}
+
+/// Returns the entry for the archetype storing exactly `signature`, or null if it is
+/// unknown. The pointer is invalidated when another archetype is registered.
+pub fn getBySig(self: *@This(), signature: Signature) ?*Entry {
+    const id = self.signature_to_id.get(signature) orelse return null;
+    const index = id.index.tryGet() orelse return null;
+    if (index >= self.entries.items.len) return null;
+
+    const entry = &self.entries.items[index];
+    if (!entry.id.eql(id)) return null;
+    return entry;
 }
 
 /// Returns the entry for the archetype storing exactly `ids`, creating and registering it
@@ -63,9 +75,7 @@ pub fn getOrCreate(
     defer signature.deinit(self.allocator);
     try signature.add(self.allocator, ids);
 
-    if (self.signature_to_id.get(signature)) |id| {
-        return &self.entries.items[id.index.get()];
-    }
+    if (self.getBySig(signature)) |entry| return entry;
 
     const allocator = self.allocator;
     try self.entries.ensureUnusedCapacity(allocator, 1);
@@ -107,11 +117,8 @@ test "init starts empty and deinit releases registered archetypes" {
     var components = CompRegistry.init(allocator);
     defer components.deinit();
 
-    const id = ArchetypeId.init(0, 1);
-    var arch = try Archetype.init(allocator, &.{}, components);
-    errdefer arch.deinit();
-    try registry.signature_to_id.put(allocator, arch.meta.signature, id);
-    try registry.entries.append(allocator, .{ .id = id, .archetype = arch });
+    _ = try registry.getOrCreate(&.{}, components);
+    try expectEqual(1, registry.entries.items.len);
 }
 
 test "getOrCreate reuses an archetype for the same component set" {
@@ -143,11 +150,11 @@ test "getOrCreate reuses an archetype for the same component set" {
     try expect(!first.eql(both));
     try expect(!empty.eql(first));
     try expectEqual(3, registry.entries.items.len);
-    try expectEqual(1, registry.get(first).?.meta.columns.items.len);
-    try expectEqual(2, registry.get(both).?.meta.columns.items.len);
+    try expectEqual(1, registry.getById(first).?.meta.columns.items.len);
+    try expectEqual(2, registry.getById(both).?.meta.columns.items.len);
 }
 
-test "get returns a registered archetype and rejects unknown ids" {
+test "getById returns a registered archetype and rejects unknown ids" {
     const allocator = std.testing.allocator;
     var components = CompRegistry.init(allocator);
     defer components.deinit();
@@ -158,10 +165,40 @@ test "get returns a registered archetype and rejects unknown ids" {
     const entry = try registry.getOrCreate(&.{}, components);
     const id = entry.id;
     try expectEqual(0, entry.archetype.len());
-    try expect(registry.get(id) != null);
-    try expectEqual(0, registry.get(id).?.len());
+    try expect(registry.getById(id) != null);
+    try expectEqual(0, registry.getById(id).?.len());
 
-    try expect(registry.get(ArchetypeId.init(0, 2)) == null);
-    try expect(registry.get(ArchetypeId.init(1, 1)) == null);
-    try expect(registry.get(ArchetypeId.invalid) == null);
+    try expect(registry.getById(ArchetypeId.init(0, 2)) == null);
+    try expect(registry.getById(ArchetypeId.init(1, 1)) == null);
+    try expect(registry.getById(ArchetypeId.invalid) == null);
+}
+
+test "getBySig finds an entry by its component set" {
+    const allocator = std.testing.allocator;
+
+    const Position = struct {
+        pub const se_component: CompMark = .{};
+        x: i32,
+    };
+    const Velocity = struct {
+        pub const se_component: CompMark = .{};
+        y: i32,
+    };
+
+    var components = CompRegistry.init(allocator);
+    defer components.deinit();
+    const position = try components.register(Position);
+    const velocity = try components.register(Velocity);
+
+    var registry = init(allocator);
+    defer registry.deinit();
+
+    const entry = try registry.getOrCreate(&.{position}, components);
+    try expect(registry.getBySig(entry.archetype.meta.signature).? == entry);
+
+    // A component set without a registered archetype is not found.
+    var unknown = Signature.init(allocator);
+    defer unknown.deinit(allocator);
+    try unknown.add(allocator, &.{velocity});
+    try expect(registry.getBySig(unknown) == null);
 }

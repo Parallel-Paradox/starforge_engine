@@ -38,7 +38,7 @@ pub fn deinit(self: *@This()) void {
 
 /// Returns the sparse set registered for `id`, or null if it is unknown.
 /// The pointer is invalidated when another sparse set is registered.
-pub fn get(self: *@This(), id: SparseSetId) ?*SparseSet {
+pub fn getById(self: *@This(), id: SparseSetId) ?*SparseSet {
     const index = id.index.tryGet() orelse return null;
     if (index >= self.entries.items.len) return null;
 
@@ -47,13 +47,23 @@ pub fn get(self: *@This(), id: SparseSetId) ?*SparseSet {
     return &entry.set;
 }
 
+/// Returns the entry for the sparse set of `type_id`, or null if it is unknown.
+/// The pointer is invalidated when another sparse set is registered.
+pub fn getByType(self: *@This(), type_id: TypeId) ?*Entry {
+    const id = self.type_to_id.get(type_id) orelse return null;
+    const index = id.index.tryGet() orelse return null;
+    if (index >= self.entries.items.len) return null;
+
+    const entry = &self.entries.items[index];
+    if (!entry.id.eql(id)) return null;
+    return entry;
+}
+
 /// Returns the entry for the sparse set of `meta`, creating and registering it when needed.
 /// The pointer is invalidated when another sparse set is registered.
 pub fn getOrCreate(self: *@This(), meta: TypeMeta) Allocator.Error!*Entry {
     const type_id = meta.id;
-    if (self.type_to_id.get(type_id)) |id| {
-        return &self.entries.items[id.index.get()];
-    }
+    if (self.getByType(type_id)) |entry| return entry;
 
     const allocator = self.allocator;
     try self.entries.ensureUnusedCapacity(allocator, 1);
@@ -90,12 +100,8 @@ test "init starts empty and deinit releases registered sets" {
     try expectEqual(0, registry.entries.items.len);
     try expectEqual(0, registry.retired.items.len);
 
-    const id = SparseSetId.init(0, 1);
-    try registry.type_to_id.put(allocator, TypeId.of(u32), id);
-
-    var set = try SparseSet.initWithCapacity(allocator, TypeMeta.of(u32), 2);
-    errdefer set.deinit();
-    try registry.entries.append(allocator, .{ .id = id, .set = set });
+    _ = try registry.getOrCreate(TypeMeta.of(u32));
+    try expectEqual(1, registry.entries.items.len);
 }
 
 test "getOrCreate reuses a set per component type" {
@@ -117,16 +123,26 @@ test "getOrCreate reuses a set per component type" {
     try expectEqual(2, registry.entries.items.len);
 }
 
-test "get returns a registered set and rejects unknown ids" {
+test "getById returns a registered set and rejects unknown ids" {
     const allocator = std.testing.allocator;
     var registry = init(allocator);
     defer registry.deinit();
 
     const entry = try registry.getOrCreate(TypeMeta.of(u32));
-    const set = registry.get(entry.id).?;
+    const set = registry.getById(entry.id).?;
     try expect(set.meta.eql(TypeMeta.of(u32)));
 
-    try expect(registry.get(SparseSetId.init(0, 1)) == null);
-    try expect(registry.get(SparseSetId.init(1, 0)) == null);
-    try expect(registry.get(SparseSetId.invalid) == null);
+    try expect(registry.getById(SparseSetId.init(0, 1)) == null);
+    try expect(registry.getById(SparseSetId.init(1, 0)) == null);
+    try expect(registry.getById(SparseSetId.invalid) == null);
+}
+
+test "getByType finds an entry by its component type" {
+    const allocator = std.testing.allocator;
+    var registry = init(allocator);
+    defer registry.deinit();
+
+    const entry = try registry.getOrCreate(TypeMeta.of(u32));
+    try expect(registry.getByType(TypeId.of(u32)).? == entry);
+    try expect(registry.getByType(TypeId.of(i32)) == null);
 }
