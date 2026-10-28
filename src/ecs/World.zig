@@ -8,6 +8,7 @@ const ComponentRegistry = component.Registry;
 const entity = ecs.entity;
 const EntityId = entity.Id;
 const EntityRegistry = entity.Registry;
+const ArchetypeRegistry = entity.archetype.Registry;
 const Bundle = engine.reflect.Bundle;
 
 entity_reg: EntityRegistry,
@@ -22,6 +23,16 @@ pub fn init(allocator: Allocator) @This() {
 
 pub fn deinit(self: *@This()) void {
     self.entity_reg.deinit();
+}
+
+/// Returns the component registry backing this world.
+pub fn componentRegistry(self: *@This()) *ComponentRegistry {
+    return &self.entity_reg.comp_reg;
+}
+
+/// Returns the archetype registry backing this world.
+pub fn archetypeRegistry(self: *@This()) *ArchetypeRegistry {
+    return &self.entity_reg.arch_reg;
 }
 
 /// Creates an entity from a struct or tuple of component values.
