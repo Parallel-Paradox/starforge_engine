@@ -6,6 +6,7 @@ const AlignedBuffer = engine.base.AlignedBuffer;
 const NonMax = engine.base.niche.NonMax;
 const TypeMeta = engine.reflect.TypeMeta;
 const EntityId = engine.ecs.entity.Id;
+const Iter = engine.ecs.entity.sparse_set.Iter;
 
 pub const DenseId = NonMax(u32);
 
@@ -26,6 +27,11 @@ pub fn len(self: @This()) usize {
 /// The capacity of the sparse set.
 pub fn capacity(self: @This()) usize {
     return self.entity_ids.capacity;
+}
+
+/// Returns an iterator over the live entities, in dense storage order.
+pub fn iter(self: *@This()) Iter {
+    return .{ .set = self };
 }
 
 /// Creates an empty sparse set for `meta`. The dense data buffer is allocated

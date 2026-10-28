@@ -1,8 +1,9 @@
-/// A family of chunks sharing one `meta` and one `layout`, storing entities of the same
-/// component set in contiguous buffers.
-///
-/// Entities are spread across chunks; capacity grows on demand by doubling the first
-/// chunk or appending new chunks, see `reserve`.
+//! A family of chunks sharing one `meta` and one `layout`, storing entities of the same
+//! component set in contiguous buffers.
+//!
+//! Entities are spread across chunks; capacity grows on demand by doubling the first
+//! chunk or appending new chunks, see `reserve`.
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -18,6 +19,7 @@ const archetype = ecs.entity.archetype;
 const Meta = archetype.Meta;
 const Layout = archetype.ChunkLayout;
 const Chunk = archetype.Chunk;
+const Iter = archetype.Iter;
 
 /// The metadata describing the component columns shared by every chunk.
 meta: *Meta,
@@ -110,6 +112,11 @@ pub fn typedAt(self: @This(), T: type, column: usize, row: usize) struct { ptr: 
         .ptr = @ptrCast(@alignCast(result.data.ptr)),
         .id = result.id,
     };
+}
+
+/// Returns an iterator over the live entities, in the order they were added.
+pub fn iter(self: *@This()) Iter {
+    return .{ .archetype = self };
 }
 
 /// Reserves capacity for at least `additional` more entities.
