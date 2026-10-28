@@ -1,4 +1,4 @@
-const query = @import("Query.zig");
+const query = @import("query/mod.zig");
 pub const Query = query.Query;
 
 const engine = @import("engine");
