@@ -17,9 +17,7 @@ storage: Storage = .archetype,
 /// Builds the metadata of the component `T`.
 /// `T` must declare `pub const se_component: Mark = .{};`.
 pub fn of(comptime T: type) @This() {
-    if (comptime !mod.isComponent(T)) @compileError(
-        @typeName(T) ++ " is not a component: declare pub const se_component: Mark = .{};",
-    );
+    comptime mod.assertComponent(T, "Meta.of");
     return .{
         .type_meta = TypeMeta.of(T),
         .storage = T.se_component.storage,

@@ -37,11 +37,7 @@ pub fn addEntity(
 ) (EntityRegistry.Error || ComponentRegistry.Error)!EntityId {
     const types = Bundle.flatTypes(@TypeOf(fields));
     comptime {
-        for (types) |T| {
-            if (!component.isComponent(T)) @compileError(
-                @typeName(T) ++ " is not a component: declare pub const se_component: Mark = .{};",
-            );
-        }
+        for (types) |T| component.assertComponent(T, "addEntity");
     }
 
     inline for (types) |T| _ = try self.entity_reg.comp_reg.register(T);
