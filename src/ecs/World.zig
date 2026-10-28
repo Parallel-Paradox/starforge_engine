@@ -30,7 +30,7 @@ pub fn deinit(self: *@This()) void {
 /// flattened recursively; anything else is a compile error. Component types are registered
 /// before the bundle is built.
 ///
-/// On failure the values copied into the temporary bundle are disposed.
+/// On failure the caller keeps ownership of `fields`.
 pub fn addEntity(
     self: *@This(),
     fields: anytype,
@@ -47,7 +47,7 @@ pub fn addEntity(
     inline for (types) |T| _ = try self.entity_reg.comp_reg.register(T);
 
     var bundle = try Bundle.init(self.allocator, fields);
-    errdefer bundle.deinit();
+    errdefer bundle.releaseStorage();
     return self.addBundle(bundle);
 }
 
@@ -79,6 +79,17 @@ const Transform = struct {
     position: Position,
 };
 
+/// Too large for a single chunk, so creating its archetype fails.
+const Huge = struct {
+    pub const se_component: TestMark = .{};
+    calls: *usize,
+    payload: [16 * 1024 + 1]u8 = undefined,
+
+    pub fn deinit(self: *@This()) void {
+        self.calls.* += 1;
+    }
+};
+
 test "addEntity registers components and creates an entity" {
     const allocator = std.testing.allocator;
     var world = init(allocator);
@@ -99,4 +110,21 @@ test "addEntity registers components and creates an entity" {
 
     // A non-component field is a compile error:
     // _ = world.addEntity(.{ @as(u32, 1) });
+}
+
+test "addEntity releases the temporary bundle without disposing copied values" {
+    const allocator = std.testing.allocator;
+    var world = init(allocator);
+    defer world.deinit();
+
+    var calls: usize = 0;
+    var huge: Huge = .{ .calls = &calls };
+
+    // The archetype layout fails after `Bundle.init` has copied the fields.
+    try std.testing.expectError(error.BufferTooLarge, world.addEntity(.{huge}));
+    try expect(calls == 0);
+
+    // The caller still owns the value.
+    huge.deinit();
+    try expect(calls == 1);
 }
