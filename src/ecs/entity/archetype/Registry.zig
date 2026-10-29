@@ -15,10 +15,42 @@ pub const Entry = struct {
     archetype: Archetype,
 };
 
+/// Ring buffer of archetype changes. Consumers compare it with `entries[id.index].id`:
+/// equal means the archetype added, different means it was removed.
+pub const ChangeLog = struct {
+    const capacity = 1024;
+
+    /// Archetype ids indexed by change version modulo `capacity`.
+    buf: [capacity]ArchetypeId = @splat(ArchetypeId.invalid),
+    /// Version of the oldest change still retained in `buf`.
+    oldest_ver: usize = 0,
+    /// Version of the next change to be recorded (the exclusive end).
+    next_ver: usize = 0,
+
+    /// Records `id` as the change at `next_ver` and advances the version, evicting the
+    /// oldest entry once the buffer is full.
+    pub fn record(self: *@This(), id: ArchetypeId) void {
+        self.buf[self.next_ver % capacity] = id;
+        self.next_ver +%= 1;
+
+        if (self.next_ver > capacity) {
+            self.oldest_ver = self.next_ver - capacity;
+        }
+    }
+
+    /// Returns the change recorded at `ver`, or null if it has not been recorded yet or
+    /// has already been evicted.
+    pub fn get(self: *const @This(), ver: usize) ?ArchetypeId {
+        if (ver < self.oldest_ver or ver >= self.next_ver) return null;
+        return self.buf[ver % capacity];
+    }
+};
+
 /// `Signature` -> archetype id.
 signature_to_id: Signature.Lookup(ArchetypeId),
 entries: std.ArrayList(Entry),
 retired: std.ArrayList(ArchetypeId),
+change_log: ChangeLog = .{},
 allocator: Allocator,
 
 /// Creates an empty registry; free it with `deinit`.
@@ -27,6 +59,7 @@ pub fn init(allocator: Allocator) @This() {
         .signature_to_id = .empty,
         .entries = .empty,
         .retired = .empty,
+        .change_log = .{},
         .allocator = allocator,
     };
 }
@@ -35,7 +68,10 @@ pub fn init(allocator: Allocator) @This() {
 pub fn deinit(self: *@This()) void {
     // The map keys point into the archetypes, so drop the map before them.
     self.signature_to_id.deinit(self.allocator);
-    for (self.entries.items) |*entry| entry.archetype.deinit();
+    for (self.entries.items) |*entry| {
+        // Removed slots are already disposed and marked with an invalid id.
+        if (entry.id.isValid()) entry.archetype.deinit();
+    }
     self.entries.deinit(self.allocator);
     self.retired.deinit(self.allocator);
 }
@@ -97,13 +133,83 @@ pub fn getOrCreate(
         self.entries.items[id.index.get()] = entry;
     }
     self.signature_to_id.putAssumeCapacityNoClobber(arch.meta.signature, id);
+
+    self.change_log.record(id);
     return &self.entries.items[id.index.get()];
+}
+
+/// Removes the archetype registered for `id`, retiring its id for reuse and releasing its
+/// storage. Does nothing if `id` is unknown.
+///
+/// # Errors
+///
+/// Returns an allocator error if the retired-id list cannot grow.
+pub fn remove(self: *@This(), id: ArchetypeId) Allocator.Error!void {
+    const index = id.index.tryGet() orelse return;
+    if (index >= self.entries.items.len) return;
+
+    const entry = &self.entries.items[index];
+    if (!entry.id.eql(id)) return;
+
+    try self.retired.ensureUnusedCapacity(self.allocator, 1);
+
+    // The map key points into the archetype, so drop the entry before freeing it.
+    _ = self.signature_to_id.remove(entry.archetype.meta.signature);
+    entry.archetype.deinit();
+
+    // An invalid id no longer matches the logged change, which marks this slot as a
+    // removal for change-log consumers, and lets `deinit` skip the freed archetype.
+    entry.id = .invalid;
+    self.retired.appendAssumeCapacity(.{
+        .index = id.index,
+        .generation = id.generation.next(),
+    });
+
+    self.change_log.record(id);
 }
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
 const CompMark = engine.ecs.component.Mark;
+
+const Position = struct {
+    pub const se_component: CompMark = .{};
+    x: i32,
+};
+
+const Velocity = struct {
+    pub const se_component: CompMark = .{};
+    y: i32,
+};
+
+const Registry = @This();
+
+/// A registry with `Position` and `Velocity` registered as components.
+const Fixture = struct {
+    components: CompRegistry,
+    registry: Registry,
+    position: CompId,
+    velocity: CompId,
+
+    fn init(allocator: Allocator) !Fixture {
+        var components = CompRegistry.init(allocator);
+        errdefer components.deinit();
+        const position = try components.register(Position);
+        const velocity = try components.register(Velocity);
+        return .{
+            .components = components,
+            .registry = Registry.init(allocator),
+            .position = position,
+            .velocity = velocity,
+        };
+    }
+
+    fn deinit(self: *Fixture) void {
+        self.registry.deinit();
+        self.components.deinit();
+    }
+};
 
 test "init starts empty and deinit releases registered archetypes" {
     const allocator = std.testing.allocator;
@@ -113,92 +219,121 @@ test "init starts empty and deinit releases registered archetypes" {
     try expectEqual(0, registry.signature_to_id.count());
     try expectEqual(0, registry.entries.items.len);
     try expectEqual(0, registry.retired.items.len);
+    try expectEqual(0, registry.change_log.oldest_ver);
+    try expectEqual(0, registry.change_log.next_ver);
+    try expect(registry.change_log.get(0) == null);
 
     var components = CompRegistry.init(allocator);
     defer components.deinit();
 
-    _ = try registry.getOrCreate(&.{}, components);
+    const id = (try registry.getOrCreate(&.{}, components)).id;
     try expectEqual(1, registry.entries.items.len);
+    try expectEqual(0, registry.change_log.oldest_ver);
+    try expectEqual(1, registry.change_log.next_ver);
+    try expect(registry.change_log.get(0).?.eql(id));
+    try expect(registry.change_log.get(1) == null);
 }
 
-test "getOrCreate reuses an archetype for the same component set" {
+test "getOrCreate registers, reuses, and looks up archetypes" {
     const allocator = std.testing.allocator;
+    var fixture = try Fixture.init(allocator);
+    defer fixture.deinit();
 
-    const Position = struct {
-        pub const se_component: CompMark = .{};
-        x: i32,
-    };
-    const Velocity = struct {
-        pub const se_component: CompMark = .{};
-        y: i32,
-    };
+    const registry = &fixture.registry;
 
-    var components = CompRegistry.init(allocator);
-    defer components.deinit();
-    const position = try components.register(Position);
-    const velocity = try components.register(Velocity);
-
-    var registry = init(allocator);
-    defer registry.deinit();
-
-    const empty = (try registry.getOrCreate(&.{}, components)).id;
-    const first = (try registry.getOrCreate(&.{position}, components)).id;
-    const again = (try registry.getOrCreate(&.{position}, components)).id;
-    const both = (try registry.getOrCreate(&.{ velocity, position }, components)).id;
-
-    try expect(first.eql(again));
-    try expect(!first.eql(both));
-    try expect(!empty.eql(first));
-    try expectEqual(3, registry.entries.items.len);
-    try expectEqual(1, registry.getById(first).?.meta.columns.items.len);
-    try expectEqual(2, registry.getById(both).?.meta.columns.items.len);
-}
-
-test "getById returns a registered archetype and rejects unknown ids" {
-    const allocator = std.testing.allocator;
-    var components = CompRegistry.init(allocator);
-    defer components.deinit();
-
-    var registry = init(allocator);
-    defer registry.deinit();
-
-    const entry = try registry.getOrCreate(&.{}, components);
-    const id = entry.id;
-    try expectEqual(0, entry.archetype.len());
-    try expect(registry.getById(id) != null);
-    try expectEqual(0, registry.getById(id).?.len());
-
-    try expect(registry.getById(ArchetypeId.init(0, 2)) == null);
-    try expect(registry.getById(ArchetypeId.init(1, 1)) == null);
-    try expect(registry.getById(ArchetypeId.invalid) == null);
-}
-
-test "getBySig finds an entry by its component set" {
-    const allocator = std.testing.allocator;
-
-    const Position = struct {
-        pub const se_component: CompMark = .{};
-        x: i32,
-    };
-    const Velocity = struct {
-        pub const se_component: CompMark = .{};
-        y: i32,
-    };
-
-    var components = CompRegistry.init(allocator);
-    defer components.deinit();
-    const position = try components.register(Position);
-    const velocity = try components.register(Velocity);
-
-    var registry = init(allocator);
-    defer registry.deinit();
-
-    const entry = try registry.getOrCreate(&.{position}, components);
-    try expect(registry.getBySig(entry.archetype.meta.signature).? == entry);
-
-    // A component set without a registered archetype is not found.
+    // Unknown ids and signatures are not found.
     var unknown = Signature.init(allocator);
     defer unknown.deinit(allocator);
-    try unknown.add(allocator, &.{velocity});
+    try unknown.add(allocator, &.{fixture.velocity});
     try expect(registry.getBySig(unknown) == null);
+    try expect(registry.getById(ArchetypeId.init(0, 0)) == null);
+    try expect(registry.getById(ArchetypeId.invalid) == null);
+
+    const empty_id = (try registry.getOrCreate(&.{}, fixture.components)).id;
+    try expectEqual(0, registry.getById(empty_id).?.len());
+
+    const first = try registry.getOrCreate(&.{fixture.position}, fixture.components);
+    const first_id = first.id;
+    try expectEqual(1, first.archetype.meta.columns.items.len);
+    try expect(registry.getBySig(first.archetype.meta.signature).? == first);
+
+    // Reusing an existing archetype does not log a new change.
+    const again = try registry.getOrCreate(&.{fixture.position}, fixture.components);
+    try expectEqual(2, registry.change_log.next_ver);
+    try expect(again == first);
+    try expect(again.id.eql(first_id));
+
+    const both_id = (try registry.getOrCreate(
+        &.{ fixture.velocity, fixture.position },
+        fixture.components,
+    )).id;
+    try expectEqual(3, registry.entries.items.len);
+    try expectEqual(3, registry.change_log.next_ver);
+    try expectEqual(0, registry.change_log.oldest_ver);
+    try expect(!both_id.eql(first_id));
+    try expectEqual(2, registry.getById(both_id).?.meta.columns.items.len);
+}
+
+test "remove releases an archetype, retires its id, and logs the removal" {
+    const allocator = std.testing.allocator;
+    var fixture = try Fixture.init(allocator);
+    defer fixture.deinit();
+
+    const registry = &fixture.registry;
+
+    const old_id = (try registry.getOrCreate(&.{fixture.position}, fixture.components)).id;
+    try registry.remove(old_id);
+
+    // The removal is logged under the old id, which the cleared slot no longer matches.
+    try expectEqual(2, registry.change_log.next_ver);
+    const removal = registry.change_log.get(1).?;
+    try expect(removal.eql(old_id));
+    try expect(!registry.entries.items[removal.index.get()].id.eql(removal));
+    try expect(registry.getById(old_id) == null);
+    try expectEqual(0, registry.signature_to_id.count());
+    try expectEqual(1, registry.retired.items.len);
+    try expect(registry.retired.items[0].index == old_id.index);
+    try expect(registry.retired.items[0].generation == old_id.generation.next());
+
+    // Removing it again, or removing unknown ids, is a no-op.
+    try registry.remove(old_id);
+    try registry.remove(ArchetypeId.invalid);
+    try registry.remove(ArchetypeId.init(42, 0));
+    try expectEqual(2, registry.change_log.next_ver);
+    try expectEqual(1, registry.retired.items.len);
+
+    // The retired index is reused with a new generation and logged as an addition.
+    const new_id = (try registry.getOrCreate(&.{fixture.velocity}, fixture.components)).id;
+    try expectEqual(3, registry.change_log.next_ver);
+    try expect(registry.change_log.get(2).?.eql(new_id));
+    try expect(new_id.index == old_id.index);
+    try expect(!new_id.eql(old_id));
+    try expect(registry.getById(old_id) == null);
+    try expect(registry.getById(new_id) != null);
+
+    // Removed slots are skipped by deinit.
+    try registry.remove(new_id);
+    try expect(registry.getById(new_id) == null);
+}
+
+test "change log wraps and evicts the oldest versions" {
+    var log: ChangeLog = .{};
+
+    for (0..ChangeLog.capacity + 3) |index| {
+        log.record(ArchetypeId.init(@intCast(index), 0));
+    }
+
+    try expectEqual(ChangeLog.capacity + 3, log.next_ver);
+    try expectEqual(3, log.oldest_ver);
+
+    // Version 1024 overwrote slot 0; version 3 is now the oldest retained event.
+    try expect(log.buf[0].eql(ArchetypeId.init(ChangeLog.capacity, 0)));
+    try expect(log.buf[3].eql(ArchetypeId.init(3, 0)));
+
+    // Evicted versions are no longer readable, while the retained range is.
+    try expect(log.get(0) == null);
+    try expect(log.get(2) == null);
+    try expect(log.get(3).?.eql(ArchetypeId.init(3, 0)));
+    try expect(log.get(ChangeLog.capacity + 2).?.eql(ArchetypeId.init(ChangeLog.capacity + 2, 0)));
+    try expect(log.get(ChangeLog.capacity + 3) == null);
 }
