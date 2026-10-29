@@ -1,25 +1,29 @@
 //! Queries: typed iteration over entities matching a component layout and filters.
 //!
-//! `Query(Item)` yields one item per entity holding every component in `Item`;
-//! `QueryF(Item, filters)` further narrows archetypes with `filter` operators.
+//! `Query(Item)` yields one item per entity holding every component in `Item`.
+//! `QueryF(Item, filters)` narrows the result with `filter` operators.
 //!
-//! `Item` is a struct or tuple whose fields are `*T` (mutable), `*const T`
-//! (read-only), or `EntityId`. The yielded item is `Item` itself, so tuples are
-//! destructured by the caller:
+//! `Item` is a struct or tuple of `*T`, `*const T`, or `EntityId` fields.
+//! Tuples are yielded as tuples and destructured by the caller:
 //!
 //! ```zig
-//! var query = Query(struct { EntityId, *const Position, *Velocity }).extract(&world);
+//! var query = try Query(struct { EntityId, *const Position, *Velocity }).extract(&world);
+//! defer query.deinit();
 //! while (query.next()) |item| {
 //!     const id, const position, const velocity = item;
 //!     velocity.dx = position.x;
 //! }
 //! ```
 //!
-//! Filters run per entity against the entity's signature, which includes both archetype
-//! and sparse-set components. Every target component is implicitly required. Items point
-//! into component storage and are invalidated by structural changes that grow or move it.
+//! A query caches matching archetypes. `reset` applies structural changes from the
+//! archetype change log and restarts iteration.
+//!
+//! Filters are evaluated per archetype, then per entity when undecided. Every target
+//! component is implicitly required. Items point into component storage and are
+//! invalidated by structural changes that grow or move it.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 const engine = @import("engine");
 const ecs = engine.ecs;
@@ -31,31 +35,42 @@ const EntityId = entity.Id;
 const Archetype = entity.archetype.Archetype;
 const ArchetypeIter = entity.archetype.Iter;
 const ArchetypeId = entity.archetype.Id;
+const ArchetypeRegistry = entity.archetype.Registry;
 const TypeId = engine.reflect.TypeId;
 
 pub const filter = @import("filter.zig");
 
-// Filter operators, in scope so tests read like `. { With(A), Without(B) }`.
+// Filter operators, in scope for tests.
 const With = filter.With;
 const Without = filter.Without;
 const All = filter.All;
 const Any = filter.Any;
 const Not = filter.Not;
 
-/// A query over the entities holding every component in `Item`, with no extra filters.
-///
-/// `Item` is a struct or tuple whose fields are either `*T` (mutable), `*const T`
-/// (read-only) for archetype or sparse-set components, or `EntityId`. A tuple `Item` is
-/// yielded as a tuple, so callers destructure it themselves. See `QueryF` for filters.
+/// Cached archetypes for a query.
+pub const State = struct {
+    pub const Entry = struct {
+        id: ArchetypeId,
+        /// Whether entities in this archetype need sparse-set filter checks.
+        needs_entity_filter: bool = false,
+    };
+
+    /// Archetypes matching the query, ordered by registry index.
+    archetypes: std.ArrayList(Entry) = .empty,
+    /// Next archetype change-log version to apply.
+    version: usize = 0,
+};
+
+/// A query over entities holding every component in `Item`, without filters.
+/// See `QueryF` for filters.
 pub fn Query(comptime I: type) type {
     return QueryF(I, .{});
 }
 
-/// A query over the entities holding every component in `Item`, narrowed by `filters`.
+/// A query over entities holding every component in `Item`, narrowed by `filters`.
 ///
-/// `filters` is a tuple of filter types, for example `.{With(Frozen)}`, evaluated
-/// against each entity's signature. A query is single-use state: extract one, walk it
-/// with `next`.
+/// `filters` is a tuple of filter types, for example `.{With(Frozen)}`.
+/// Call `reset` after structural changes and `deinit` when done.
 pub fn QueryF(comptime I: type, comptime filters: anytype) type {
     validateTarget(I);
     filter.validate(filters);
@@ -76,27 +91,45 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
 
     return struct {
         world: *World,
-        /// Component ids of the target fields, resolved when the query is extracted.
+        /// Component ids of the target fields, resolved at extract.
         comp_ids: [comp_types.len]?CompId = undefined,
         /// Column index in the current archetype for each target field.
         columns: [comp_types.len]usize = undefined,
-        /// Id of the last archetype inspected; scanning resumes after it.
-        next_archetype: ArchetypeId = .invalid,
-        /// Iterator over the archetype under iteration, or null while seeking one.
+        /// Index of the next cached archetype to inspect.
+        next_index: usize = 0,
+        /// Iterator over the current archetype; null while seeking one.
         iter: ?ArchetypeIter = null,
+        /// Cached archetypes matching this query, refreshed by `reset`.
+        state: ?State = null,
+        /// Whether entities in the current archetype need sparse-set filter checks.
+        needs_entity_filter: bool = false,
 
         pub const Item = I;
 
-        /// Builds a query over `world`.
-        ///
-        /// Component ids are resolved once, so register the components before extracting
-        /// a query that targets them.
-        pub fn extract(world: *World) @This() {
+        /// Builds a query over `world` and performs a full state refresh.
+        /// Register target components before extracting. Call `deinit` when done.
+        pub fn extract(world: *World) Allocator.Error!@This() {
             var self: @This() = .{ .world = world };
+            errdefer self.deinit();
             inline for (comp_types, 0..) |maybe, i| {
                 if (maybe) |T| self.comp_ids[i] = world.compReg().getByType(T);
             }
+            try self.reset();
             return self;
+        }
+
+        /// Releases the cached archetype list.
+        pub fn deinit(self: *@This()) void {
+            if (self.state) |*state| state.archetypes.deinit(self.world.allocator);
+        }
+
+        /// Refreshes the cached archetypes and restarts iteration.
+        /// Applies change-log entries incrementally; rebuilds when the query version is
+        /// outside the retained log window.
+        pub fn reset(self: *@This()) Allocator.Error!void {
+            try self.updateState();
+            self.next_index = 0;
+            self.iter = null;
         }
 
         /// Returns the next matching entity, or null once every archetype was visited.
@@ -113,17 +146,17 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
             }
         }
 
-        /// Moves to the next archetype holding the archetype-stored target components.
+        /// Moves to the next cached archetype.
         fn advance(self: *@This()) bool {
-            const entries = self.world.archReg().entries.items;
-            const start = if (self.next_archetype.index.tryGet()) |index| index + 1 else 0;
+            if (self.state == null) return false;
+            const state = &self.state.?;
 
-            for (entries[start..]) |*entry| {
-                self.next_archetype = entry.id;
+            while (self.next_index < state.archetypes.items.len) {
+                const cached = state.archetypes.items[self.next_index];
+                self.next_index += 1;
 
-                const archetype = &entry.archetype;
-                if (!self.accept(archetype)) continue;
-
+                const archetype = self.world.archReg().getById(cached.id) orelse continue;
+                self.needs_entity_filter = cached.needs_entity_filter;
                 self.iter = archetype.iter();
                 self.enter(archetype);
                 return true;
@@ -131,8 +164,126 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
             return false;
         }
 
+        /// Applies changes since `state.version`, rebuilding when they were evicted.
+        fn updateState(self: *@This()) Allocator.Error!void {
+            const registry = self.world.archReg();
+            const log = &registry.change_log;
+
+            if (self.state == null) return self.rebuildState();
+            const state = &self.state.?;
+
+            if (state.version < log.oldest_ver or state.version > log.next_ver) {
+                return self.rebuildState();
+            }
+
+            var ver = state.version;
+            while (ver < log.next_ver) : (ver += 1) {
+                const changed = log.get(ver) orelse return self.rebuildState();
+                try self.applyChange(registry, changed);
+            }
+            state.version = log.next_ver;
+        }
+
+        /// Rebuilds the cached archetype list from the registry.
+        fn rebuildState(self: *@This()) Allocator.Error!void {
+            const registry = self.world.archReg();
+            const allocator = self.world.allocator;
+
+            if (self.state == null) self.state = State{};
+            const state = &self.state.?;
+
+            state.archetypes.clearRetainingCapacity();
+            errdefer {
+                state.archetypes.deinit(allocator);
+                self.state = null;
+            }
+
+            for (registry.entries.items) |*entry| {
+                if (!entry.id.isValid()) continue;
+                const decision = self.classify(&entry.archetype) orelse continue;
+                try state.archetypes.append(allocator, .{
+                    .id = entry.id,
+                    .needs_entity_filter = decision == .per_entity,
+                });
+            }
+
+            state.version = registry.change_log.next_ver;
+        }
+
+        /// Returns the filter decision for `archetype`, or null when it does not match.
+        fn classify(self: *@This(), archetype: *const Archetype) ?filter.ArchetypeDecision {
+            if (!self.accept(archetype)) return null;
+
+            if (comptime has_filters) {
+                const decision = filter.archetypeDecision(filters, .{
+                    .registry = self.world.compReg(),
+                    .signature = archetype.meta.signature,
+                });
+                if (decision == .reject) return null;
+                return decision;
+            }
+
+            return .accept;
+        }
+
+        /// Applies one change-log entry to the cached archetype list.
+        fn applyChange(
+            self: *@This(),
+            registry: *ArchetypeRegistry,
+            id: ArchetypeId,
+        ) Allocator.Error!void {
+            const index = id.index.tryGet() orelse return;
+
+            if (index < registry.entries.items.len and
+                registry.entries.items[index].id.eql(id))
+            {
+                const decision = self.classify(&registry.entries.items[index].archetype) orelse {
+                    self.removeFromState(id);
+                    return;
+                };
+                try self.insertIntoState(.{
+                    .id = id,
+                    .needs_entity_filter = decision == .per_entity,
+                });
+                return;
+            }
+
+            self.removeFromState(id);
+        }
+
+        /// Inserts or updates a cached archetype, keeping the list ordered by index.
+        fn insertIntoState(self: *@This(), entry: State.Entry) Allocator.Error!void {
+            const state = &self.state.?;
+            const items = state.archetypes.items;
+            const index = entry.id.index.get();
+
+            for (items, 0..) |existing, i| {
+                if (existing.id.index == entry.id.index) {
+                    items[i] = entry;
+                    return;
+                }
+                if (existing.id.index.get() > index) {
+                    try state.archetypes.insert(self.world.allocator, i, entry);
+                    return;
+                }
+            }
+
+            try state.archetypes.append(self.world.allocator, entry);
+        }
+
+        /// Removes a cached archetype by id, if present.
+        fn removeFromState(self: *@This(), id: ArchetypeId) void {
+            const state = &self.state.?;
+            for (state.archetypes.items, 0..) |entry, i| {
+                if (entry.id.eql(id)) {
+                    _ = state.archetypes.orderedRemove(i);
+                    return;
+                }
+            }
+        }
+
         /// Whether `archetype` holds every archetype-stored target component.
-        fn accept(self: *@This(), archetype: *Archetype) bool {
+        fn accept(self: *const @This(), archetype: *const Archetype) bool {
             const signature = archetype.meta.signature;
             inline for (comp_types, 0..) |maybe, i| {
                 if (maybe) |T| {
@@ -154,16 +305,18 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
             }
         }
 
-        /// Builds the item for `entity_item`, or null when a filter rejects the entity
-        /// or it lacks a sparse-set target component.
+        /// Builds the item for `entity_item`, or null when a filter rejects it or a
+        /// sparse-set target is missing.
         fn build(self: *@This(), entity_item: ArchetypeIter.Item) ?Item {
             if (comptime has_filters) {
-                const target = self.world.entityReg().get(entity_item.id) orelse return null;
-                const context: filter.Context = .{
-                    .registry = self.world.compReg(),
-                    .signature = target.signature,
-                };
-                if (!filter.matches(filters, context)) return null;
+                if (self.needs_entity_filter) {
+                    const target = self.world.entityReg().get(entity_item.id) orelse return null;
+                    const context: filter.Context = .{
+                        .registry = self.world.compReg(),
+                        .signature = target.signature,
+                    };
+                    if (!filter.matchesSparse(filters, context)) return null;
+                }
             }
 
             var result: Item = undefined;
@@ -245,99 +398,70 @@ const Health = struct {
 
 /// Counts the items a query type yields over `world`.
 fn count(comptime Q: type, world: *World) usize {
-    var query = Q.extract(world);
+    var query = Q.extract(world) catch @panic("test query allocation failed");
+    defer query.deinit();
+    return drain(&query);
+}
+
+/// Drains a query instance and returns how many items it yielded.
+fn drain(query: anytype) usize {
     var visited: usize = 0;
     while (query.next()) |_| visited += 1;
     return visited;
 }
 
-test "a query visits the entities holding its target components" {
+test "queries yield target fields and write through pointers" {
     const allocator = std.testing.allocator;
     var world = World.init(allocator);
     defer world.deinit();
+
+    _ = try world.addEntity(.{Velocity{ .dx = 7, .dy = 8 }});
+    try expectEqual(0, count(Query(struct { pos: *const Position }), &world));
 
     const both = try world.addEntity(.{
         Position{ .x = 1, .y = 2 },
         Velocity{ .dx = 3, .dy = 4 },
     });
     const position_only = try world.addEntity(.{Position{ .x = 5, .y = 6 }});
-    _ = try world.addEntity(.{Velocity{ .dx = 7, .dy = 8 }});
 
-    var query = Query(struct {
-        id: EntityId,
-        pos: *const Position,
-    }).extract(&world);
-
-    const first = query.next().?;
+    // A struct target yields one item per matching entity.
+    var positions = try Query(struct { id: EntityId, pos: *const Position }).extract(&world);
+    defer positions.deinit();
+    const first = positions.next().?;
     try expect(first.id.eql(both));
     try expectEqual(1, first.pos.x);
-
-    const second = query.next().?;
+    const second = positions.next().?;
     try expect(second.id.eql(position_only));
     try expectEqual(5, second.pos.x);
+    try expect(positions.next() == null);
 
-    try expect(query.next() == null);
-}
-
-test "mutable target fields write into component storage" {
-    const allocator = std.testing.allocator;
-    var world = World.init(allocator);
-    defer world.deinit();
-
-    const id = try world.addEntity(.{
-        Position{ .x = 1, .y = 2 },
-        Velocity{ .dx = 3, .dy = 4 },
-    });
-
-    var query = Query(struct {
-        pos: *const Position,
-        vel: *Velocity,
-    }).extract(&world);
-
-    const item = query.next().?;
+    // Mutable targets write into component storage.
+    var mutable = try Query(struct { pos: *const Position, vel: *Velocity }).extract(&world);
+    defer mutable.deinit();
+    const item = mutable.next().?;
     item.vel.dx = 30;
     item.vel.dy = 40;
     try expectEqual(1, item.pos.x);
-    try expect(query.next() == null);
+    try expect(mutable.next() == null);
 
-    // A second query observes the values written through the first one.
-    var reread = Query(struct {
-        id: EntityId,
-        vel: *const Velocity,
-    }).extract(&world);
-
-    const written = reread.next().?;
-    try expect(written.id.eql(id));
-    try expectEqual(30, written.vel.dx);
-    try expectEqual(40, written.vel.dy);
-}
-
-test "tuple targets are yielded for callers to destructure" {
-    const allocator = std.testing.allocator;
-    var world = World.init(allocator);
-    defer world.deinit();
-
-    const id = try world.addEntity(.{
-        Position{ .x = 1, .y = 2 },
-        Velocity{ .dx = 3, .dy = 4 },
-    });
-    _ = try world.addEntity(.{Position{ .x = 5, .y = 6 }});
-
-    var query = Query(struct { EntityId, *const Position, *Velocity }).extract(&world);
-    const item = query.next().?;
-    const entity_id, const position, const velocity = item;
-    try expect(entity_id.eql(id));
+    // A tuple target yields the fields in declaration order.
+    var tuple = try Query(struct { EntityId, *const Position, *const Velocity }).extract(&world);
+    defer tuple.deinit();
+    const entity_id, const position, const velocity = tuple.next().?;
+    try expect(entity_id.eql(both));
     try expectEqual(1, position.x);
-    try expectEqual(3, velocity.dx);
+    try expectEqual(30, velocity.dx);
+    try expectEqual(40, velocity.dy);
+    try expect(tuple.next() == null);
 
-    velocity.dx = 30;
-    try expect(query.next() == null);
-
-    var reread = Query(struct { *const Velocity }).extract(&world);
-    try expectEqual(30, reread.next().?[0].dx);
+    // Unregistered targets match nothing.
+    const Never = struct {
+        pub const se_component: CompMark = .{};
+    };
+    try expectEqual(0, count(Query(struct { never: *const Never }), &world));
 }
 
-test "sparse set components are matched per entity and visible to filters" {
+test "sparse set targets are matched per entity" {
     const allocator = std.testing.allocator;
     var world = World.init(allocator);
     defer world.deinit();
@@ -346,15 +470,16 @@ test "sparse set components are matched per entity and visible to filters" {
         Position{ .x = 1, .y = 2 },
         Health{ .value = 10 },
     });
-    const position_only = try world.addEntity(.{Position{ .x = 3, .y = 4 }});
+    _ = try world.addEntity(.{Position{ .x = 3, .y = 4 }});
     const health_only = try world.addEntity(.{Health{ .value = 20 }});
-    const velocity_only = try world.addEntity(.{Velocity{ .dx = 5, .dy = 6 }});
+    _ = try world.addEntity(.{Velocity{ .dx = 5, .dy = 6 }});
 
-    var query = Query(struct {
+    var query = try Query(struct {
         id: EntityId,
         pos: *const Position,
         health: *Health,
     }).extract(&world);
+    defer query.deinit();
 
     const item = query.next().?;
     try expect(item.id.eql(both));
@@ -364,7 +489,8 @@ test "sparse set components are matched per entity and visible to filters" {
     try expect(query.next() == null);
 
     // Sparse-only targets visit entities across different archetypes.
-    var healths = Query(struct { id: EntityId, health: *const Health }).extract(&world);
+    var healths = try Query(struct { id: EntityId, health: *const Health }).extract(&world);
+    defer healths.deinit();
 
     const first = healths.next().?;
     try expect(first.id.eql(both));
@@ -378,17 +504,6 @@ test "sparse set components are matched per entity and visible to filters" {
 
     // Entities without the sparse component remain visible to archetype-only queries.
     try expectEqual(2, count(Query(struct { pos: *const Position }), &world));
-
-    // Filters inspect the entity signature, so sparse components match per entity.
-    var with_health = QueryF(struct { id: EntityId }, .{With(Health)}).extract(&world);
-    try expect(with_health.next().?.id.eql(both));
-    try expect(with_health.next().?.id.eql(health_only));
-    try expect(with_health.next() == null);
-
-    var without_health = QueryF(struct { id: EntityId }, .{Without(Health)}).extract(&world);
-    try expect(without_health.next().?.id.eql(position_only));
-    try expect(without_health.next().?.id.eql(velocity_only));
-    try expect(without_health.next() == null);
 }
 
 test "filters narrow the archetypes a query visits" {
@@ -436,37 +551,123 @@ test "filters narrow the archetypes a query visits" {
     ));
 
     // `With` yields the moving entity, `Without` yields the other two in archetype order.
-    var with_velocity = QueryF(struct { id: EntityId }, .{With(Velocity)}).extract(&world);
+    var with_velocity = try QueryF(struct { id: EntityId }, .{With(Velocity)}).extract(&world);
+    defer with_velocity.deinit();
     try expect(with_velocity.next().?.id.eql(moving));
     try expect(with_velocity.next() == null);
 
-    var without_velocity = QueryF(struct { id: EntityId }, .{
+    var without_velocity = try QueryF(struct { id: EntityId }, .{
         Without(Velocity),
     }).extract(&world);
+    defer without_velocity.deinit();
     try expect(without_velocity.next().?.id.eql(still));
     try expect(without_velocity.next().?.id.eql(frozen));
     try expect(without_velocity.next() == null);
 }
 
-test "queries are empty without matching archetypes" {
+test "filters decide per archetype before checking sparse components per entity" {
     const allocator = std.testing.allocator;
     var world = World.init(allocator);
     defer world.deinit();
 
-    try expectEqual(0, count(Query(struct { pos: *const Position }), &world));
+    const moving_hurt = try world.addEntity(.{
+        Position{ .x = 1, .y = 2 },
+        Health{ .value = 10 },
+    });
+    _ = try world.addEntity(.{Position{ .x = 3, .y = 4 }});
+    _ = try world.addEntity(.{
+        Velocity{ .dx = 5, .dy = 6 },
+        Health{ .value = 20 },
+    });
+    _ = try world.addEntity(.{Velocity{ .dx = 7, .dy = 8 }});
 
-    _ = try world.addEntity(.{Velocity{ .dx = 1, .dy = 2 }});
-    try expectEqual(0, count(Query(struct { pos: *const Position }), &world));
+    // Sparse-only filters match per entity.
+    try expectEqual(2, count(QueryF(struct { id: EntityId }, .{With(Health)}), &world));
+    try expectEqual(2, count(QueryF(struct { id: EntityId }, .{Without(Health)}), &world));
 
-    // A component that is not registered is absent from every archetype.
-    const Never = struct {
-        pub const se_component: CompMark = .{};
-    };
-    try expectEqual(0, count(Query(struct { never: *const Never }), &world));
+    // Position accepts the archetype; Health is not checked per entity.
+    try expectEqual(3, count(
+        QueryF(struct { id: EntityId }, .{Any(.{
+            With(Position),
+            With(Health),
+        })}),
+        &world,
+    ));
+
+    // Position decides the archetype; Health is checked per entity.
+    var with_both = try QueryF(struct { id: EntityId }, .{
+        With(.{ Position, Health }),
+    }).extract(&world);
+    defer with_both.deinit();
+    try expect(with_both.next().?.id.eql(moving_hurt));
+    try expect(with_both.next() == null);
+
+    var all_both = try QueryF(struct { id: EntityId }, .{All(.{
+        With(Position),
+        With(Health),
+    })}).extract(&world);
+    defer all_both.deinit();
+    try expect(all_both.next().?.id.eql(moving_hurt));
+    try expect(all_both.next() == null);
+
+    // Without(Position) accepts archetypes that lack Position regardless of Health.
+    try expectEqual(3, count(
+        QueryF(struct { id: EntityId }, .{Any(.{
+            Without(Position),
+            With(Health),
+        })}),
+        &world,
+    ));
 }
 
-/// 6000 + 2000 bytes per entity, so a chunk holds two entities and the third
-/// opens a second chunk.
+test "reset reapplies archetype changes incrementally" {
+    const allocator = std.testing.allocator;
+    var world = World.init(allocator);
+    defer world.deinit();
+
+    _ = try world.addEntity(.{Position{ .x = 1, .y = 2 }});
+
+    var query = try Query(struct { pos: *const Position }).extract(&world);
+    defer query.deinit();
+
+    try expectEqual(1, drain(&query));
+
+    // A new matching archetype is picked up by reset.
+    const added = try world.addEntity(.{
+        Position{ .x = 3, .y = 4 },
+        Velocity{ .dx = 5, .dy = 6 },
+    });
+    try query.reset();
+    try expectEqual(2, drain(&query));
+
+    // Removal is picked up incrementally.
+    const archetype_id = world.entityReg().get(added).?.archetype_id;
+    try world.archReg().remove(archetype_id);
+    try query.reset();
+    try expectEqual(1, drain(&query));
+}
+
+test "reset rebuilds the cache when the change log evicted its version" {
+    const allocator = std.testing.allocator;
+    var world = World.init(allocator);
+    defer world.deinit();
+
+    _ = try world.addEntity(.{Position{ .x = 1, .y = 2 }});
+
+    var query = try Query(struct { pos: *const Position }).extract(&world);
+    defer query.deinit();
+
+    const log = &world.archReg().change_log;
+    // Simulate an evicted change-log window.
+    log.record(ArchetypeId.init(0, 0));
+    log.oldest_ver = query.state.?.version + 1;
+
+    try query.reset();
+    try expectEqual(1, drain(&query));
+    try expectEqual(log.next_ver, query.state.?.version);
+}
+
+/// 6000 + 2000 bytes per entity. A chunk holds two entities; the third opens a second.
 const Big = struct {
     pub const se_component: CompMark = .{};
     bytes: [6000]u8,
@@ -490,11 +691,12 @@ test "queries walk every chunk of an archetype" {
         _ = try world.addEntity(.{ big, small });
     }
 
-    var query = Query(struct {
+    var query = try Query(struct {
         id: EntityId,
         big: *Big,
         small: *const Small,
     }).extract(&world);
+    defer query.deinit();
 
     var visited: usize = 0;
     while (query.next()) |item| : (visited += 1) {
@@ -505,7 +707,8 @@ test "queries walk every chunk of an archetype" {
     }
     try expectEqual(3, visited);
 
-    var reread = Query(struct { big: *const Big }).extract(&world);
+    var reread = try Query(struct { big: *const Big }).extract(&world);
+    defer reread.deinit();
     while (reread.next()) |item| {
         try expectEqual(0xFF, item.big.bytes[0]);
     }
