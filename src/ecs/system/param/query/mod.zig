@@ -1,23 +1,23 @@
-//! Queries: typed iteration over the entities matching a component layout and filters.
+//! Queries: typed iteration over entities matching a component layout and filters.
 //!
-//! `Query(target)` yields one item per entity holding every component in `target`;
-//! `QueryF(target, filters)` narrows the archetypes further with `filter` operators.
-//! The yielded item is `target` itself, with each field addressing the entity's value:
+//! `Query(Item)` yields one item per entity holding every component in `Item`;
+//! `QueryF(Item, filters)` further narrows archetypes with `filter` operators.
+//!
+//! `Item` is a struct or tuple whose fields are `*T` (mutable), `*const T`
+//! (read-only), or `EntityId`. The yielded item is `Item` itself, so tuples are
+//! destructured by the caller:
 //!
 //! ```zig
-//! var query = Query(struct {
-//!     id: EntityId,
-//!     position: *const Position,
-//!     velocity: *Velocity,
-//! }).extract(&world);
-//!
-//! while (query.next()) |item| item.velocity.dx += 1;
+//! var query = Query(struct { EntityId, *const Position, *Velocity }).extract(&world);
+//! while (query.next()) |item| {
+//!     const id, const position, const velocity = item;
+//!     velocity.dx = position.x;
+//! }
 //! ```
 //!
-//! Filters are evaluated once per archetype, and every target component is implicitly
-//! required. Only archetype-stored components are supported. Items address archetype
-//! storage, so they are invalidated by structural changes that grow or move the matched
-//! archetype, such as spawning entities or reserving capacity.
+//! Filters run per entity against the entity's signature, which includes both archetype
+//! and sparse-set components. Every target component is implicitly required. Items point
+//! into component storage and are invalidated by structural changes that grow or move it.
 
 const std = @import("std");
 
@@ -29,6 +29,7 @@ const CompId = component.Id;
 const entity = ecs.entity;
 const EntityId = entity.Id;
 const Archetype = entity.archetype.Archetype;
+const ArchetypeIter = entity.archetype.Iter;
 const ArchetypeId = entity.archetype.Id;
 const TypeId = engine.reflect.TypeId;
 
@@ -41,25 +42,28 @@ const All = filter.All;
 const Any = filter.Any;
 const Not = filter.Not;
 
-/// A query over the entities holding every component in `target`, with no extra filters.
+/// A query over the entities holding every component in `Item`, with no extra filters.
 ///
-/// `target` is a struct whose fields are either `*T` (mutable), `*const T` (read-only)
-/// for archetype components, or `EntityId`. See `QueryF` for filters.
-pub fn Query(comptime target: type) type {
-    return QueryF(target, .{});
+/// `Item` is a struct or tuple whose fields are either `*T` (mutable), `*const T`
+/// (read-only) for archetype or sparse-set components, or `EntityId`. A tuple `Item` is
+/// yielded as a tuple, so callers destructure it themselves. See `QueryF` for filters.
+pub fn Query(comptime I: type) type {
+    return QueryF(I, .{});
 }
 
-/// A query over the entities holding every component in `target`, narrowed by `filters`.
+/// A query over the entities holding every component in `Item`, narrowed by `filters`.
 ///
 /// `filters` is a tuple of filter types, for example `.{With(Frozen)}`, evaluated
-/// once per archetype. A query is single-use state: extract one, walk it with `next`.
-pub fn QueryF(comptime target: type, comptime filters: anytype) type {
-    validateTarget(target);
+/// against each entity's signature. A query is single-use state: extract one, walk it
+/// with `next`.
+pub fn QueryF(comptime I: type, comptime filters: anytype) type {
+    validateTarget(I);
     filter.validate(filters);
 
-    const info = @typeInfo(target).@"struct";
+    const info = @typeInfo(I).@"struct";
     const field_names = info.field_names;
     const field_types = info.field_types;
+    const has_filters = @typeInfo(@TypeOf(filters)).@"struct".field_names.len != 0;
 
     // The component type of each target field, or null for an `EntityId` field.
     const comp_types: [field_types.len]?type = blk: {
@@ -78,13 +82,10 @@ pub fn QueryF(comptime target: type, comptime filters: anytype) type {
         columns: [comp_types.len]usize = undefined,
         /// Id of the last archetype inspected; scanning resumes after it.
         next_archetype: ArchetypeId = .invalid,
-        /// Id of the archetype under iteration, or `.invalid` while seeking one.
-        current: ArchetypeId = .invalid,
-        /// Row of the next entity inside `current`.
-        row: usize = 0,
+        /// Iterator over the archetype under iteration, or null while seeking one.
+        iter: ?ArchetypeIter = null,
 
-        /// The yielded item: `target` with its fields filled in.
-        pub const Item = target;
+        pub const Item = I;
 
         /// Builds a query over `world`.
         ///
@@ -93,7 +94,7 @@ pub fn QueryF(comptime target: type, comptime filters: anytype) type {
         pub fn extract(world: *World) @This() {
             var self: @This() = .{ .world = world };
             inline for (comp_types, 0..) |maybe, i| {
-                if (maybe) |T| self.comp_ids[i] = world.componentRegistry().getByType(T);
+                if (maybe) |T| self.comp_ids[i] = world.compReg().getByType(T);
             }
             return self;
         }
@@ -101,73 +102,84 @@ pub fn QueryF(comptime target: type, comptime filters: anytype) type {
         /// Returns the next matching entity, or null once every archetype was visited.
         pub fn next(self: *@This()) ?Item {
             while (true) {
-                if (self.world.archetypeRegistry().getById(self.current)) |archetype| {
-                    if (self.row < archetype.len()) {
-                        const row = self.row;
-                        self.row += 1;
-                        return self.build(archetype, row);
+                if (self.iter) |*iter| {
+                    while (iter.next()) |entity_item| {
+                        if (self.build(entity_item)) |item| return item;
                     }
-                    self.current = ArchetypeId.invalid;
+                    self.iter = null;
                 }
 
                 if (!self.advance()) return null;
             }
         }
 
-        /// Moves to the next archetype passing the filters and holding the target.
+        /// Moves to the next archetype holding the archetype-stored target components.
         fn advance(self: *@This()) bool {
-            const registry = self.world.archetypeRegistry();
-            const entries = registry.entries.items;
+            const entries = self.world.archReg().entries.items;
             const start = if (self.next_archetype.index.tryGet()) |index| index + 1 else 0;
 
-            for (entries[start..]) |entry| {
+            for (entries[start..]) |*entry| {
                 self.next_archetype = entry.id;
 
-                const archetype = registry.getById(entry.id) orelse continue;
+                const archetype = &entry.archetype;
                 if (!self.accept(archetype)) continue;
 
-                self.current = entry.id;
-                self.row = 0;
+                self.iter = archetype.iter();
                 self.enter(archetype);
                 return true;
             }
             return false;
         }
 
-        /// Whether `archetype` passes the filters and holds every target component.
+        /// Whether `archetype` holds every archetype-stored target component.
         fn accept(self: *@This(), archetype: *Archetype) bool {
-            const context: filter.Context = .{
-                .registry = self.world.componentRegistry(),
-                .signature = archetype.meta.signature,
-            };
-            if (!filter.matches(filters, context)) return false;
-
+            const signature = archetype.meta.signature;
             inline for (comp_types, 0..) |maybe, i| {
-                if (maybe != null) {
+                if (maybe) |T| {
                     const id = self.comp_ids[i] orelse return false;
-                    if (!context.hasId(id)) return false;
+                    if (T.se_component.storage == .archetype and !signature.has(id)) return false;
                 }
             }
             return true;
         }
 
-        /// Resolves the column of each target field in `archetype`.
+        /// Resolves the column of each archetype-stored target field in `archetype`.
         fn enter(self: *@This(), archetype: *Archetype) void {
             inline for (comp_types, 0..) |maybe, i| {
                 if (maybe) |T| {
-                    self.columns[i] = archetype.meta.id_to_col.get(TypeId.of(T)).?;
+                    if (T.se_component.storage == .archetype) {
+                        self.columns[i] = archetype.meta.id_to_col.get(TypeId.of(T)).?;
+                    }
                 }
             }
         }
 
-        /// Builds the item for `row` of `archetype`.
-        fn build(self: *@This(), archetype: *Archetype, row: usize) Item {
+        /// Builds the item for `entity_item`, or null when a filter rejects the entity
+        /// or it lacks a sparse-set target component.
+        fn build(self: *@This(), entity_item: ArchetypeIter.Item) ?Item {
+            if (comptime has_filters) {
+                const target = self.world.entityReg().get(entity_item.id) orelse return null;
+                const context: filter.Context = .{
+                    .registry = self.world.compReg(),
+                    .signature = target.signature,
+                };
+                if (!filter.matches(filters, context)) return null;
+            }
+
             var result: Item = undefined;
             inline for (comp_types, field_names, 0..) |maybe, name, i| {
                 if (maybe) |T| {
-                    @field(result, name) = archetype.typedAt(T, self.columns[i], row).ptr;
+                    if (T.se_component.storage == .archetype) {
+                        const bytes = entity_item.column(self.columns[i]);
+                        @field(result, name) = @ptrCast(@alignCast(bytes.ptr));
+                    } else {
+                        const entry = self.world.sparseReg().getByType(TypeId.of(T)) orelse
+                            return null;
+                        @field(result, name) = entry.set.get(T, entity_item.id) orelse
+                            return null;
+                    }
                 } else {
-                    @field(result, name) = archetype.ids.items[row];
+                    @field(result, name) = entity_item.id;
                 }
             }
             return result;
@@ -175,15 +187,14 @@ pub fn QueryF(comptime target: type, comptime filters: anytype) type {
     };
 }
 
-/// Asserts that `target` is a struct of component pointers and `EntityId` fields.
-fn validateTarget(comptime target: type) void {
-    const info = switch (@typeInfo(target)) {
+/// Asserts that `Item` is a struct or tuple of component pointers and `EntityId` fields.
+fn validateTarget(comptime Item: type) void {
+    const info = switch (@typeInfo(Item)) {
         .@"struct" => |info| info,
         else => @compileError(
-            "Query target must be a struct of pointer fields, got " ++ @typeName(target),
+            "Query target must be a struct or tuple of pointer fields, got " ++ @typeName(Item),
         ),
     };
-    if (info.is_tuple) @compileError("Query target must have named fields");
     if (info.field_names.len == 0) @compileError("Query target must declare at least one field");
 
     inline for (info.field_names, info.field_types) |name, F| {
@@ -191,7 +202,7 @@ fn validateTarget(comptime target: type) void {
     }
 }
 
-/// Asserts that `F` is a single-item pointer to an archetype component.
+/// Asserts that `F` is a single-item pointer to a component.
 fn validatePointerField(comptime name: []const u8, comptime F: type) void {
     const pointer = switch (@typeInfo(F)) {
         .pointer => |pointer| pointer,
@@ -203,12 +214,7 @@ fn validatePointerField(comptime name: []const u8, comptime F: type) void {
         "Query target field `" ++ name ++ "` must be a single-item pointer",
     );
 
-    const T = pointer.child;
-    component.assertComponent(T, "Query target field `" ++ name ++ "`");
-    if (T.se_component.storage != .archetype) @compileError(
-        "Query target field `" ++ name ++ "` requires archetype storage, but " ++
-            @typeName(T) ++ " uses a sparse set",
-    );
+    component.assertComponent(pointer.child, "Query target field `" ++ name ++ "`");
 }
 
 const expect = std.testing.expect;
@@ -230,6 +236,11 @@ const Velocity = struct {
 
 const Frozen = struct {
     pub const se_component: CompMark = .{};
+};
+
+const Health = struct {
+    pub const se_component: CompMark = .{ .storage = .sparse_set };
+    value: u32,
 };
 
 /// Counts the items a query type yields over `world`.
@@ -299,6 +310,85 @@ test "mutable target fields write into component storage" {
     try expect(written.id.eql(id));
     try expectEqual(30, written.vel.dx);
     try expectEqual(40, written.vel.dy);
+}
+
+test "tuple targets are yielded for callers to destructure" {
+    const allocator = std.testing.allocator;
+    var world = World.init(allocator);
+    defer world.deinit();
+
+    const id = try world.addEntity(.{
+        Position{ .x = 1, .y = 2 },
+        Velocity{ .dx = 3, .dy = 4 },
+    });
+    _ = try world.addEntity(.{Position{ .x = 5, .y = 6 }});
+
+    var query = Query(struct { EntityId, *const Position, *Velocity }).extract(&world);
+    const item = query.next().?;
+    const entity_id, const position, const velocity = item;
+    try expect(entity_id.eql(id));
+    try expectEqual(1, position.x);
+    try expectEqual(3, velocity.dx);
+
+    velocity.dx = 30;
+    try expect(query.next() == null);
+
+    var reread = Query(struct { *const Velocity }).extract(&world);
+    try expectEqual(30, reread.next().?[0].dx);
+}
+
+test "sparse set components are matched per entity and visible to filters" {
+    const allocator = std.testing.allocator;
+    var world = World.init(allocator);
+    defer world.deinit();
+
+    const both = try world.addEntity(.{
+        Position{ .x = 1, .y = 2 },
+        Health{ .value = 10 },
+    });
+    const position_only = try world.addEntity(.{Position{ .x = 3, .y = 4 }});
+    const health_only = try world.addEntity(.{Health{ .value = 20 }});
+    const velocity_only = try world.addEntity(.{Velocity{ .dx = 5, .dy = 6 }});
+
+    var query = Query(struct {
+        id: EntityId,
+        pos: *const Position,
+        health: *Health,
+    }).extract(&world);
+
+    const item = query.next().?;
+    try expect(item.id.eql(both));
+    try expectEqual(1, item.pos.x);
+    try expectEqual(10, item.health.value);
+    item.health.value = 11;
+    try expect(query.next() == null);
+
+    // Sparse-only targets visit entities across different archetypes.
+    var healths = Query(struct { id: EntityId, health: *const Health }).extract(&world);
+
+    const first = healths.next().?;
+    try expect(first.id.eql(both));
+    try expectEqual(11, first.health.value);
+
+    const second = healths.next().?;
+    try expect(second.id.eql(health_only));
+    try expectEqual(20, second.health.value);
+
+    try expect(healths.next() == null);
+
+    // Entities without the sparse component remain visible to archetype-only queries.
+    try expectEqual(2, count(Query(struct { pos: *const Position }), &world));
+
+    // Filters inspect the entity signature, so sparse components match per entity.
+    var with_health = QueryF(struct { id: EntityId }, .{With(Health)}).extract(&world);
+    try expect(with_health.next().?.id.eql(both));
+    try expect(with_health.next().?.id.eql(health_only));
+    try expect(with_health.next() == null);
+
+    var without_health = QueryF(struct { id: EntityId }, .{Without(Health)}).extract(&world);
+    try expect(without_health.next().?.id.eql(position_only));
+    try expect(without_health.next().?.id.eql(velocity_only));
+    try expect(without_health.next() == null);
 }
 
 test "filters narrow the archetypes a query visits" {

@@ -5,6 +5,7 @@ const engine = @import("engine");
 const AlignedBuffer = engine.base.AlignedBuffer;
 const NonMax = engine.base.niche.NonMax;
 const TypeMeta = engine.reflect.TypeMeta;
+const TypeId = engine.reflect.TypeId;
 const EntityId = engine.ecs.entity.Id;
 const Iter = engine.ecs.entity.sparse_set.Iter;
 
@@ -32,6 +33,31 @@ pub fn capacity(self: @This()) usize {
 /// Returns an iterator over the live entities, in dense storage order.
 pub fn iter(self: *@This()) Iter {
     return .{ .set = self };
+}
+
+/// Returns the bytes of the value stored for `id`, or null if the set lacks it.
+pub fn getBytes(self: @This(), id: EntityId) ?[]u8 {
+    const row = self.denseIndex(id) orelse return null;
+    return (self.ptr + row * self.meta.size)[0..self.meta.size];
+}
+
+/// Returns the typed value stored for `id`, or null if the set lacks it.
+pub fn get(self: @This(), comptime T: type, id: EntityId) ?*T {
+    std.debug.assert(self.meta.id.eql(TypeId.of(T)));
+    const bytes = self.getBytes(id) orelse return null;
+    return @ptrCast(@alignCast(bytes.ptr));
+}
+
+/// Returns the dense row holding `id`, or null if the set lacks it.
+fn denseIndex(self: @This(), id: EntityId) ?usize {
+    const index = id.index.tryGet() orelse return null;
+    if (index >= self.sparse_to_dense.items.len) return null;
+
+    const dense = self.sparse_to_dense.items[index].tryGet() orelse return null;
+    const row: usize = @intCast(dense);
+    if (row >= self.len()) return null;
+    if (!self.entity_ids.items[row].eql(id)) return null;
+    return row;
 }
 
 /// Creates an empty sparse set for `meta`. The dense data buffer is allocated
@@ -249,4 +275,33 @@ test "initWithCapacity grows zero-sized types without a dense allocation" {
     try expectEqual(8, set.capacity());
     try expectEqual(4, set.len());
     try expect(meta.alignment.check(@intFromPtr(set.ptr)));
+}
+
+test "get returns the value for an entity and null when absent" {
+    const allocator = std.testing.allocator;
+
+    var set = try initWithCapacity(allocator, TypeMeta.of(u32), 2);
+    defer set.deinit();
+
+    try set.sparse_to_dense.ensureTotalCapacity(allocator, 2);
+    set.sparse_to_dense.appendAssumeCapacity(.from(0));
+    set.sparse_to_dense.appendAssumeCapacity(.invalid);
+
+    set.entity_ids.appendAssumeCapacity(EntityId.init(0, 1));
+    set.entity_ids.appendAssumeCapacity(EntityId.init(1, 1));
+
+    const values: [*]u32 = @ptrCast(@alignCast(set.ptr));
+    values[0] = 7;
+
+    try expectEqual(7, set.get(u32, EntityId.init(0, 1)).?.*);
+
+    const bytes = set.getBytes(EntityId.init(0, 1)).?;
+    try expectEqual(@as(usize, @sizeOf(u32)), bytes.len);
+    try expectEqual(7, @as(*u32, @ptrCast(@alignCast(bytes.ptr))).*);
+
+    // An unwritten dense entry, a stale generation, and an out-of-range index are absent.
+    try expect(set.get(u32, EntityId.init(1, 1)) == null);
+    try expect(set.get(u32, EntityId.init(0, 2)) == null);
+    try expect(set.get(u32, EntityId.init(2, 1)) == null);
+    try expect(set.getBytes(EntityId.init(1, 1)) == null);
 }

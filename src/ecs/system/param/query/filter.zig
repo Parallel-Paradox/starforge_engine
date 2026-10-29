@@ -1,4 +1,4 @@
-//! Composable filters for `Query`, evaluated against an archetype signature.
+//! Composable filters for `Query`, evaluated against an entity signature.
 //!
 //! A filter is a comptime type declaring `pub fn matches(ctx: Context) bool`.
 //! `With`, `Without` and the `All`/`Any`/`Not` operators implement that protocol,
@@ -10,18 +10,18 @@ const CompId = component.Id;
 const CompRegistry = component.Registry;
 const Signature = engine.ecs.entity.Signature;
 
-/// The archetype state a filter inspects.
+/// The entity state a filter inspects.
 pub const Context = struct {
     registry: *const CompRegistry,
     signature: Signature,
 
-    /// Whether the signature holds `T`. Returns false if `T` is not registered.
+    /// Whether the entity signature holds `T`. Returns false if `T` is not registered.
     pub fn has(self: Context, comptime T: type) bool {
         const id = self.registry.getByType(T) orelse return false;
         return self.signature.has(id);
     }
 
-    /// Whether the signature holds the component `id`.
+    /// Whether the entity signature holds the component `id`.
     ///
     /// `id` must be valid (not `CompId.invalid`).
     pub fn hasId(self: Context, id: CompId) bool {
@@ -54,15 +54,15 @@ pub fn matches(comptime filters: anytype, ctx: Context) bool {
     return true;
 }
 
-/// Matches archetypes holding every component in `Ts`.
+/// Matches entities holding every component in `Ts`.
 ///
 /// Accepts a single component type or a tuple of them: `With(A)` or
-/// `With(.{ A, B })`. An empty tuple matches every archetype.
+/// `With(.{ A, B })`. An empty tuple matches every entity.
 pub fn With(comptime Ts: anytype) type {
     return makeFilter(true, "With", Ts);
 }
 
-/// Matches archetypes holding none of the components in `Ts`.
+/// Matches entities holding none of the components in `Ts`.
 ///
 /// Accepts a single component type or a tuple of them: `Without(A)` or
 /// `Without(.{ A, B })`.
@@ -158,8 +158,8 @@ const Frozen = struct {
     pub const se_component: CompMark = .{};
 };
 
-/// A registry with `Velocity`, `Frozen` and `Position` registered, and a signature
-/// holding only `Position`.
+/// A registry with `Velocity`, `Frozen` and `Position` registered, and an entity
+/// signature holding only `Position`.
 const Setup = struct {
     registry: CompRegistry,
     signature: Signature,

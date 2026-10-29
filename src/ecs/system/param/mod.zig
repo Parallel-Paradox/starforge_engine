@@ -1,5 +1,4 @@
-const query = @import("query/mod.zig");
-pub const Query = query.Query;
+pub const query = @import("query/mod.zig");
 
 const engine = @import("engine");
 const World = engine.ecs.World;

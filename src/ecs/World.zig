@@ -9,6 +9,7 @@ const entity = ecs.entity;
 const EntityId = entity.Id;
 const EntityRegistry = entity.Registry;
 const ArchetypeRegistry = entity.archetype.Registry;
+const SparseSetRegistry = entity.sparse_set.Registry;
 const Bundle = engine.reflect.Bundle;
 
 entity_reg: EntityRegistry,
@@ -26,13 +27,23 @@ pub fn deinit(self: *@This()) void {
 }
 
 /// Returns the component registry backing this world.
-pub fn componentRegistry(self: *@This()) *ComponentRegistry {
+pub fn compReg(self: *@This()) *ComponentRegistry {
     return &self.entity_reg.comp_reg;
 }
 
+/// Returns the entity registry backing this world.
+pub fn entityReg(self: *@This()) *EntityRegistry {
+    return &self.entity_reg;
+}
+
 /// Returns the archetype registry backing this world.
-pub fn archetypeRegistry(self: *@This()) *ArchetypeRegistry {
+pub fn archReg(self: *@This()) *ArchetypeRegistry {
     return &self.entity_reg.arch_reg;
+}
+
+/// Returns the sparse set registry backing this world.
+pub fn sparseReg(self: *@This()) *SparseSetRegistry {
+    return &self.entity_reg.sparse_reg;
 }
 
 /// Creates an entity from a struct or tuple of component values.
