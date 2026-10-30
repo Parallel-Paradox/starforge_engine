@@ -95,7 +95,8 @@ pub const Link = struct {
 
 /// Releases the links and attributes owned by the span.
 pub fn deinit(self: *@This()) void {
-    const allocator = self.trace.tracer.getAllocator();
+    const tracer = self.trace.tracer orelse return;
+    const allocator = tracer.getAllocator();
     for (self.links.items) |*link| link.deinit(allocator);
     self.links.deinit(allocator);
     for (self.attrs.items) |*attr| attr.deinit(allocator);
@@ -104,35 +105,48 @@ pub fn deinit(self: *@This()) void {
 
 /// Records the begin timestamps of the span and notifies subscribers.
 pub fn start(self: *@This()) void {
-    const io = self.trace.tracer.getIo();
+    const tracer = self.trace.tracer orelse return;
+    const io = tracer.getIo();
     self.real_dur.begin = Io.Clock.real.now(io);
     self.awake_dur.begin = Io.Clock.awake.now(io);
-    self.trace.tracer.startSpan(self.*);
+    tracer.startSpan(self.*);
 }
 
-/// Records the end timestamps of the span and delivers it to subscribers.
+/// Consumes the span, recording its end timestamps and delivering it synchronously
+/// to subscribers before releasing its owned links and attributes. Do not use or
+/// deinit it after emitting. Subscribers must copy data retained after callbacks.
 pub fn emit(self: *@This()) void {
-    const io = self.trace.tracer.getIo();
+    const tracer = self.trace.tracer orelse return;
+    const io = tracer.getIo();
     self.real_dur.end = Io.Clock.real.now(io);
     self.awake_dur.end = Io.Clock.awake.now(io);
-    self.trace.tracer.emitSpan(self.*);
+    tracer.emitSpan(self.*);
+    self.deinit();
 }
 
 /// Creates a child span within the same trace, linked to this span as its parent.
 pub fn initSub(self: *const @This(), options: Options) @This() {
     var sub = self.trace.initSpan(options);
-    sub.parent_id = self.id;
+    sub.parent_id = if (self.id == .invalid) null else self.id;
     return sub;
 }
 
 /// Creates a new event attached to this span.
 pub fn initEvent(self: *const @This(), options: Event.Options) Event {
-    return self.trace.tracer.initEvent(self.*, options);
+    const tracer = self.trace.tracer orelse return .{
+        .trace = self.trace,
+        .span_id = self.id,
+        .level = options.level,
+        .name = options.name,
+        .real_ts = .zero,
+    };
+    return tracer.initEvent(self.*, options);
 }
 
 /// Appends each field of the struct `attrs` as an attribute. See `Attribute.appendStruct`.
 pub fn addAttrs(self: *@This(), attrs: anytype) Allocator.Error!void {
-    return Attribute.appendStruct(self.trace.tracer.getAllocator(), &self.attrs, attrs);
+    const tracer = self.trace.tracer orelse return;
+    return Attribute.appendStruct(tracer.getAllocator(), &self.attrs, attrs);
 }
 
 /// Records a link to another span, with the struct `attrs` as its attributes.
@@ -142,7 +156,8 @@ pub fn linkTo(
     span_id: Id,
     attrs: anytype,
 ) Allocator.Error!void {
-    const allocator = self.trace.tracer.getAllocator();
+    const tracer = self.trace.tracer orelse return;
+    const allocator = tracer.getAllocator();
     var new_link: Link = .{ .trace_id = trace_id, .span_id = span_id };
     errdefer new_link.deinit(allocator);
     try Attribute.appendStruct(allocator, &new_link.attrs, attrs);

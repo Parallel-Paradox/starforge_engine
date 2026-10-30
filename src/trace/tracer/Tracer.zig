@@ -1,6 +1,7 @@
 //! Tracer can be used to create traces and register subscribers.
 
 pub const Default = @import("Default.zig");
+pub const Global = @import("Global.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -178,4 +179,5 @@ pub fn listResources(self: @This()) []const Attribute {
 
 test {
     _ = Default;
+    _ = Global;
 }

@@ -50,19 +50,26 @@ pub const Options = struct {
     level: Level = .info,
 };
 
-/// Releases the attributes owned by the event.
+/// Discards an un-emitted event, releasing its owned attributes.
 pub fn deinit(self: *@This()) void {
-    const allocator = self.trace.tracer.getAllocator();
+    const tracer = self.trace.tracer orelse return;
+    const allocator = tracer.getAllocator();
     for (self.attrs.items) |*attr| attr.deinit(allocator);
     self.attrs.deinit(allocator);
 }
 
 /// Appends each field of the struct `attrs` as an attribute. See `Attribute.appendStruct`.
 pub fn addAttrs(self: *@This(), attrs: anytype) Allocator.Error!void {
-    return Attribute.appendStruct(self.trace.tracer.getAllocator(), &self.attrs, attrs);
+    const tracer = self.trace.tracer orelse return;
+    return Attribute.appendStruct(tracer.getAllocator(), &self.attrs, attrs);
 }
 
-/// Delivers the event to every registered subscriber.
-pub fn emit(self: *const @This()) void {
-    self.trace.tracer.emitEvent(self.*);
+/// Consumes the event, delivering it synchronously to every registered subscriber
+/// before releasing its owned attributes. Do not use or deinit it after emitting.
+/// Subscribers must copy any data they need to retain after their callback.
+pub fn emit(self: @This()) void {
+    const tracer = self.trace.tracer orelse return;
+    var this = self;
+    tracer.emitEvent(self);
+    this.deinit();
 }
