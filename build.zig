@@ -42,7 +42,7 @@ fn buildExamples(
             .target = target,
             .optimize = optimize,
         });
-        example_mod.addImport("starforge", mod_starforge);
+        example_mod.addImport(mod_name, mod_starforge);
 
         const example = b.addExecutable(.{
             .name = prefix,
