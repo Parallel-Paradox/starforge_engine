@@ -9,7 +9,7 @@ pub fn main(init: std.process.Init) !void {
     var default = trace.Tracer.Default.init(allocator, init.io);
     defer default.deinit();
 
-    var terminal = trace.Subscriber.Terminal{ .level_mask = .all };
+    var terminal = trace.Subscriber.Terminal{ .mask = .all };
     try default.tracer().subscribe(terminal.subscriber());
     try Tracer.install(default.tracer());
 

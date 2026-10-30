@@ -14,9 +14,9 @@ const Subscriber = engine.trace.Subscriber;
 const base = engine.base;
 const EpochTime = base.EpochTime;
 
-level_mask: LevelMask,
+mask: Mask = .{},
 
-pub const LevelMask = packed struct(u8) {
+pub const Mask = packed struct(u8) {
     trace: bool = false,
     debug: bool = switch (builtin.mode) {
         .debug => true,
@@ -29,12 +29,13 @@ pub const LevelMask = packed struct(u8) {
     warn: bool = true,
     err: bool = true,
     fatal: bool = true,
-    _reserved: u2 = 0,
+    span_start: bool = false,
+    span_emit: bool = false,
 
-    pub const all: LevelMask = @bitCast(@as(u8, std.math.maxInt(u8)));
-    pub const none: LevelMask = @bitCast(@as(u8, 0));
+    pub const all: Mask = @bitCast(@as(u8, std.math.maxInt(u8)));
+    pub const none: Mask = @bitCast(@as(u8, 0));
 
-    pub fn filter(self: LevelMask, level: Event.Level) bool {
+    pub fn filter(self: Mask, level: Event.Level) bool {
         return switch (level) {
             .trace => self.trace,
             .debug => self.debug,
@@ -62,7 +63,9 @@ fn this(ptr: *anyopaque) *@This() {
 }
 
 /// ┌ YYYY-MM-DD HH:MM:SS trace_id-span_id < parent_id kind name
-fn spanStarted(_: *anyopaque, span: Span) void {
+fn spanStarted(ptr: *anyopaque, span: Span) void {
+    if (!this(ptr).mask.span_start) return;
+
     const tracer = span.trace.tracer orelse return;
     const io = tracer.getIo();
 
@@ -88,7 +91,9 @@ fn spanStarted(_: *anyopaque, span: Span) void {
 /// └ YYYY-MM-DD HH:MM:SS trace_id-span_id < parent_id status name duration
 ///   attributes
 ///   -> trace_id span_id attributes
-fn spanEmitted(_: *anyopaque, span: Span) void {
+fn spanEmitted(ptr: *anyopaque, span: Span) void {
+    if (!this(ptr).mask.span_emit) return;
+
     const tracer = span.trace.tracer orelse return;
     const io = tracer.getIo();
 
@@ -185,7 +190,7 @@ fn spanDurationMs(span: Span) i96 {
 fn eventEmitted(ptr: *anyopaque, event: Event) void {
     const self = this(ptr);
 
-    if (!self.level_mask.filter(event.level)) {
+    if (!self.mask.filter(event.level)) {
         return;
     }
 
