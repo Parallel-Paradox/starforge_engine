@@ -40,26 +40,7 @@ const TypeId = engine.reflect.TypeId;
 
 pub const filter = @import("filter.zig");
 
-// Filter operators, in scope for tests.
-const With = filter.With;
-const Without = filter.Without;
-const All = filter.All;
-const Any = filter.Any;
-const Not = filter.Not;
-
-/// Cached archetypes for a query.
-pub const State = struct {
-    pub const Entry = struct {
-        id: ArchetypeId,
-        /// Whether entities in this archetype need sparse-set filter checks.
-        needs_entity_filter: bool = false,
-    };
-
-    /// Archetypes matching the query, ordered by registry index.
-    archetypes: std.ArrayList(Entry) = .empty,
-    /// Next archetype change-log version to apply.
-    version: usize = 0,
-};
+pub const State = @import("State.zig");
 
 /// A query over entities holding every component in `Item`, without filters.
 /// See `QueryF` for filters.
@@ -93,14 +74,14 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
         world: *World,
         /// Component ids of the target fields, resolved at extract.
         comp_ids: [comp_types.len]?CompId = undefined,
+        /// Cached archetypes matching this query, refreshed by `reset`.
+        state: ?State = null,
         /// Column index in the current archetype for each target field.
         columns: [comp_types.len]usize = undefined,
         /// Index of the next cached archetype to inspect.
         next_index: usize = 0,
         /// Iterator over the current archetype; null while seeking one.
         iter: ?ArchetypeIter = null,
-        /// Cached archetypes matching this query, refreshed by `reset`.
-        state: ?State = null,
         /// Whether entities in the current archetype need sparse-set filter checks.
         needs_entity_filter: bool = false,
 
@@ -120,7 +101,7 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
 
         /// Releases the cached archetype list.
         pub fn deinit(self: *@This()) void {
-            if (self.state) |*state| state.archetypes.deinit(self.world.allocator);
+            if (self.state) |*state| state.deinit(self.world.allocator);
         }
 
         /// Refreshes the cached archetypes and restarts iteration.
@@ -137,7 +118,7 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
             while (true) {
                 if (self.iter) |*iter| {
                     while (iter.next()) |entity_item| {
-                        if (self.build(entity_item)) |item| return item;
+                        if (self.buildItem(entity_item)) |item| return item;
                     }
                     self.iter = null;
                 }
@@ -158,10 +139,85 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
                 const archetype = self.world.archReg().getById(cached.id) orelse continue;
                 self.needs_entity_filter = cached.needs_entity_filter;
                 self.iter = archetype.iter();
-                self.enter(archetype);
+                self.resolveColumns(archetype);
                 return true;
             }
             return false;
+        }
+
+        /// Resolves the column of each archetype-stored target field in `archetype`.
+        fn resolveColumns(self: *@This(), archetype: *Archetype) void {
+            inline for (comp_types, 0..) |maybe, i| {
+                if (maybe) |T| {
+                    if (T.se_component.storage == .archetype) {
+                        self.columns[i] = archetype.meta.id_to_col.get(TypeId.of(T)).?;
+                    }
+                }
+            }
+        }
+
+        /// Builds the item for `entity_item`, or null when a filter rejects it or a
+        /// sparse-set target is missing.
+        fn buildItem(self: *@This(), entity_item: ArchetypeIter.Item) ?Item {
+            if (comptime has_filters) {
+                if (self.needs_entity_filter) {
+                    const target = self.world.entityReg().get(entity_item.id) orelse return null;
+                    const context: filter.Context = .{
+                        .registry = self.world.compReg(),
+                        .signature = target.signature,
+                    };
+                    if (!filter.matchesSparse(filters, context)) return null;
+                }
+            }
+
+            var result: Item = undefined;
+            inline for (comp_types, field_names, 0..) |maybe, name, i| {
+                if (maybe) |T| {
+                    if (T.se_component.storage == .archetype) {
+                        const bytes = entity_item.column(self.columns[i]);
+                        @field(result, name) = @ptrCast(@alignCast(bytes.ptr));
+                    } else {
+                        const entry = self.world.sparseReg().getByType(TypeId.of(T)) orelse
+                            return null;
+                        @field(result, name) = entry.set.get(T, entity_item.id) orelse
+                            return null;
+                    }
+                } else {
+                    @field(result, name) = entity_item.id;
+                }
+            }
+            return result;
+        }
+
+        /// Whether `archetype` holds every archetype-stored target component.
+        fn accept(self: *const @This(), archetype: *const Archetype) bool {
+            const signature = archetype.meta.signature;
+            inline for (comp_types, 0..) |maybe, i| {
+                if (maybe) |T| {
+                    const id = self.comp_ids[i] orelse return false;
+                    if (T.se_component.storage == .archetype and !signature.has(id)) return false;
+                }
+            }
+            return true;
+        }
+
+        /// Returns the filter decision for `archetype`, or null when it does not match.
+        fn classifyArchetype(
+            self: *@This(),
+            archetype: *const Archetype,
+        ) ?filter.ArchetypeDecision {
+            if (!self.accept(archetype)) return null;
+
+            if (comptime has_filters) {
+                const decision = filter.archetypeDecision(filters, .{
+                    .registry = self.world.compReg(),
+                    .signature = archetype.meta.signature,
+                });
+                if (decision == .reject) return null;
+                return decision;
+            }
+
+            return .accept;
         }
 
         /// Applies changes since `state.version`, rebuilding when they were evicted.
@@ -194,13 +250,13 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
 
             state.archetypes.clearRetainingCapacity();
             errdefer {
-                state.archetypes.deinit(allocator);
+                state.deinit(allocator);
                 self.state = null;
             }
 
             for (registry.entries.items) |*entry| {
                 if (!entry.id.isValid()) continue;
-                const decision = self.classify(&entry.archetype) orelse continue;
+                const decision = self.classifyArchetype(&entry.archetype) orelse continue;
                 try state.archetypes.append(allocator, .{
                     .id = entry.id,
                     .needs_entity_filter = decision == .per_entity,
@@ -210,22 +266,6 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
             state.version = registry.change_log.next_ver;
         }
 
-        /// Returns the filter decision for `archetype`, or null when it does not match.
-        fn classify(self: *@This(), archetype: *const Archetype) ?filter.ArchetypeDecision {
-            if (!self.accept(archetype)) return null;
-
-            if (comptime has_filters) {
-                const decision = filter.archetypeDecision(filters, .{
-                    .registry = self.world.compReg(),
-                    .signature = archetype.meta.signature,
-                });
-                if (decision == .reject) return null;
-                return decision;
-            }
-
-            return .accept;
-        }
-
         /// Applies one change-log entry to the cached archetype list.
         fn applyChange(
             self: *@This(),
@@ -233,109 +273,24 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
             id: ArchetypeId,
         ) Allocator.Error!void {
             const index = id.index.tryGet() orelse return;
+            const state = &self.state.?;
 
             if (index < registry.entries.items.len and
                 registry.entries.items[index].id.eql(id))
             {
-                const decision = self.classify(&registry.entries.items[index].archetype) orelse {
-                    self.removeFromState(id);
-                    return;
-                };
-                try self.insertIntoState(.{
+                const decision =
+                    self.classifyArchetype(&registry.entries.items[index].archetype) orelse {
+                        state.remove(id);
+                        return;
+                    };
+                try state.insert(self.world.allocator, .{
                     .id = id,
                     .needs_entity_filter = decision == .per_entity,
                 });
                 return;
             }
 
-            self.removeFromState(id);
-        }
-
-        /// Inserts or updates a cached archetype, keeping the list ordered by index.
-        fn insertIntoState(self: *@This(), entry: State.Entry) Allocator.Error!void {
-            const state = &self.state.?;
-            const items = state.archetypes.items;
-            const index = entry.id.index.get();
-
-            for (items, 0..) |existing, i| {
-                if (existing.id.index == entry.id.index) {
-                    items[i] = entry;
-                    return;
-                }
-                if (existing.id.index.get() > index) {
-                    try state.archetypes.insert(self.world.allocator, i, entry);
-                    return;
-                }
-            }
-
-            try state.archetypes.append(self.world.allocator, entry);
-        }
-
-        /// Removes a cached archetype by id, if present.
-        fn removeFromState(self: *@This(), id: ArchetypeId) void {
-            const state = &self.state.?;
-            for (state.archetypes.items, 0..) |entry, i| {
-                if (entry.id.eql(id)) {
-                    _ = state.archetypes.orderedRemove(i);
-                    return;
-                }
-            }
-        }
-
-        /// Whether `archetype` holds every archetype-stored target component.
-        fn accept(self: *const @This(), archetype: *const Archetype) bool {
-            const signature = archetype.meta.signature;
-            inline for (comp_types, 0..) |maybe, i| {
-                if (maybe) |T| {
-                    const id = self.comp_ids[i] orelse return false;
-                    if (T.se_component.storage == .archetype and !signature.has(id)) return false;
-                }
-            }
-            return true;
-        }
-
-        /// Resolves the column of each archetype-stored target field in `archetype`.
-        fn enter(self: *@This(), archetype: *Archetype) void {
-            inline for (comp_types, 0..) |maybe, i| {
-                if (maybe) |T| {
-                    if (T.se_component.storage == .archetype) {
-                        self.columns[i] = archetype.meta.id_to_col.get(TypeId.of(T)).?;
-                    }
-                }
-            }
-        }
-
-        /// Builds the item for `entity_item`, or null when a filter rejects it or a
-        /// sparse-set target is missing.
-        fn build(self: *@This(), entity_item: ArchetypeIter.Item) ?Item {
-            if (comptime has_filters) {
-                if (self.needs_entity_filter) {
-                    const target = self.world.entityReg().get(entity_item.id) orelse return null;
-                    const context: filter.Context = .{
-                        .registry = self.world.compReg(),
-                        .signature = target.signature,
-                    };
-                    if (!filter.matchesSparse(filters, context)) return null;
-                }
-            }
-
-            var result: Item = undefined;
-            inline for (comp_types, field_names, 0..) |maybe, name, i| {
-                if (maybe) |T| {
-                    if (T.se_component.storage == .archetype) {
-                        const bytes = entity_item.column(self.columns[i]);
-                        @field(result, name) = @ptrCast(@alignCast(bytes.ptr));
-                    } else {
-                        const entry = self.world.sparseReg().getByType(TypeId.of(T)) orelse
-                            return null;
-                        @field(result, name) = entry.set.get(T, entity_item.id) orelse
-                            return null;
-                    }
-                } else {
-                    @field(result, name) = entity_item.id;
-                }
-            }
-            return result;
+            state.remove(id);
         }
     };
 }
@@ -372,6 +327,12 @@ fn validatePointerField(comptime name: []const u8, comptime F: type) void {
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+
+const With = filter.With;
+const Without = filter.Without;
+const All = filter.All;
+const Any = filter.Any;
+const Not = filter.Not;
 
 const CompMark = component.Mark;
 
