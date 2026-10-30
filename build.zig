@@ -10,6 +10,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = if (target.result.os.tag.isDarwin() or switch (target.result.os.tag) {
+            .linux, .freebsd, .openbsd, .netbsd, .dragonfly => true,
+            else => false,
+        }) true else null,
     });
     mod.addImport("engine", mod);
 

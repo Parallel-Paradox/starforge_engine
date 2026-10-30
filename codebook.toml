@@ -1,4 +1,7 @@
 words = [
+    "JST",
+    "NPT",
+    "NST",
     "anyframe",
     "comptime",
     "deinit",

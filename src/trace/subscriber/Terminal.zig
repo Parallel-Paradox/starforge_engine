@@ -150,7 +150,8 @@ fn spanEmitted(_: *anyopaque, span: Span) void {
 /// Writes `YYYY-MM-DD HH:MM:SS[ trace_id-span_id][ < parent_id]` without colors,
 /// omitting invalid IDs and their separators.
 fn writeSpanPrefix(writer: *Writer, span: Span, begin: Timestamp) void {
-    const epoch_time = EpochTime.fromUnixTimestamp(begin).toStr();
+    const utc_time = EpochTime.fromUnixTimestamp(begin);
+    const epoch_time = (utc_time.toLocal() catch utc_time).toStr();
     var id_buffer: [13]u8 = undefined;
     const join_id = joinId(&id_buffer, span.trace.id, span.id);
     writer.print("{s}", .{epoch_time}) catch {};
@@ -200,7 +201,8 @@ fn eventEmitted(ptr: *anyopaque, event: Event) void {
 
     // HH:MM:SS trace_id-span_id
     terminal.setColor(.dim) catch {};
-    const epoch_time = EpochTime.fromUnixTimestamp(event.real_ts).toClockStr();
+    const utc_time = EpochTime.fromUnixTimestamp(event.real_ts);
+    const epoch_time = (utc_time.toLocal() catch utc_time).toClockStr();
     var id_buffer: [13]u8 = undefined;
     const join_id = joinId(&id_buffer, event.trace.id, event.span_id);
     writer.print("{s}", .{epoch_time}) catch {};
@@ -347,7 +349,7 @@ test "shortSpanId omits invalid IDs" {
     try expectEqualStrings("00ff", &short_id);
 }
 
-test "writeSpanPrefix omits invalid IDs without extra separators" {
+test "writeSpanPrefix uses local time and omits invalid IDs without extra separators" {
     var default = engine.trace.Tracer.Default.init(std.testing.allocator, std.testing.io);
     defer default.deinit();
     const t = default.tracer();
@@ -359,8 +361,9 @@ test "writeSpanPrefix omits invalid IDs without extra separators" {
 
     var output = Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    const begin = std.Io.Clock.real.now(std.testing.io);
+    const begin = Timestamp.fromNanoseconds(1_704_164_645 * std.time.ns_per_s);
     writeSpanPrefix(&output.writer, span, begin);
-    const expected = EpochTime.fromUnixTimestamp(begin).toStr();
+    const utc_time = EpochTime.fromUnixTimestamp(begin);
+    const expected = (utc_time.toLocal() catch utc_time).toStr();
     try expectEqualStrings(&expected, output.written());
 }
