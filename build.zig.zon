@@ -15,11 +15,12 @@
     // modify the field.
     .fingerprint = 0x874eca909781834b, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.0",
-    .dependencies = .{},
-    // Only files and directories listed here are included in the `hash` that
-    // is computed for this package. Only files listed here will remain on disk
-    // when using the zig package manager. As a rule of thumb, one should list
-    // files required for compilation plus any license(s).
+    .dependencies = .{
+        .box3d = .{
+            .url = "git+https://github.com/erincatto/box3d#336263320469e5e9febfe18697ab562488f7e97a",
+            .hash = "N-V-__8AAE2ExgD5faO32onHEVQKBBtNlZFbod30iHJYbdte",
+        },
+    },
     .paths = .{
         "examples",
         "src",
