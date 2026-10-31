@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const box3d = @import("src/physics/box3d/build_lib.zig");
+
 pub const mod_name = "starforge";
 
 pub fn build(b: *std.Build) void {
@@ -16,6 +18,9 @@ pub fn build(b: *std.Build) void {
         }) true else null,
     });
     mod.addImport("engine", mod);
+
+    const box3d_artifact = box3d.build(b, target, optimize);
+    box3d_artifact.attach(mod);
 
     const test_suites = b.addTest(.{ .name = "test", .root_module = mod });
     const test_step = b.step("test", "Run all test suites");

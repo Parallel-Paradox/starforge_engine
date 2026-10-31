@@ -2,6 +2,7 @@ words = [
     "JST",
     "NPT",
     "NST",
+    "aabb",
     "anyframe",
     "comptime",
     "deinit",
@@ -9,6 +10,7 @@ words = [
     "ecs",
     "eql",
     "errdefer",
+    "ffp",
     "ints",
     "lifecycle",
     "oom",
@@ -18,5 +20,4 @@ words = [
     "vtable",
     "zon",
 ]
-
-ignore_patterns = ["N-V-__[A-Za-z0-9_-]{30,}"]
+ignore_patterns = ["N-V-__[A-Za-z0-9_-]{30,}", "\"-D[A-Za-z0-9_=]+\""]
