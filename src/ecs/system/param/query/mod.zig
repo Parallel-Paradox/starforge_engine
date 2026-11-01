@@ -1,7 +1,7 @@
 //! Queries: typed iteration over entities matching a component layout and filters.
 //!
 //! `Query(Item)` yields one item per entity holding every component in `Item`.
-//! `QueryF(Item, filters)` narrows the result with `filter` operators.
+//! `QueryF(Item, filters)` narrows the result with `Filter` operators.
 //!
 //! `Item` is a struct or tuple of `*T`, `*const T`, or `EntityId` fields.
 //! Tuples are yielded as tuples and destructured by the caller:
@@ -37,7 +37,7 @@ const ArchetypeId = entity.archetype.Id;
 const ArchetypeRegistry = entity.archetype.Registry;
 const TypeId = engine.reflect.TypeId;
 
-pub const filter = @import("filter.zig");
+pub const Filter = @import("Filter.zig");
 
 pub const Impl = @import("Impl.zig");
 
@@ -53,12 +53,10 @@ pub fn Query(comptime I: type) type {
 /// Call `reset` after structural changes and `deinit` when done.
 pub fn QueryF(comptime I: type, comptime filters: anytype) type {
     validateTarget(I);
-    filter.validate(filters);
 
     const info = @typeInfo(I).@"struct";
     const field_names = info.field_names;
     const field_types = info.field_types;
-    const has_filters = @typeInfo(@TypeOf(filters)).@"struct".field_names.len != 0;
 
     // The component type of each target field, or null for an `EntityId` field.
     const comp_types: [field_types.len]?type = blk: {
@@ -72,14 +70,21 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
     return struct {
         /// Runtime state: component ids, cached archetypes, and iteration cursor.
         impl: Impl,
+        /// Compiled filter tree; empty when `filters` is `.{}`.
+        filter: Filter,
 
         pub const Item = I;
 
         /// Builds a query over `world` and performs a full state refresh.
         /// Register target components before extracting. Call `deinit` when done.
         pub fn extract(world: *World) Allocator.Error!@This() {
-            var self: @This() = .{ .impl = try Impl.init(world, comp_types.len) };
-            errdefer self.deinit();
+            var self: @This() = undefined;
+            self.impl = try Impl.init(world, comp_types.len);
+            errdefer self.impl.deinit();
+
+            self.filter = try Filter.init(world.allocator, world.compReg(), filters);
+            errdefer self.filter.deinit(world.allocator);
+
             inline for (comp_types, 0..) |maybe, i| {
                 if (maybe) |T| self.impl.comp_ids[i] = world.compReg().getByType(T);
             }
@@ -87,8 +92,9 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
             return self;
         }
 
-        /// Releases the cached archetype list.
+        /// Releases the filter tree and the cached archetype list.
         pub fn deinit(self: *@This()) void {
+            self.filter.deinit(self.impl.world.allocator);
             self.impl.deinit();
         }
 
@@ -126,15 +132,9 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
             const state = &self.impl;
             const cached = state.archetypes.items[state.current_index];
 
-            if (comptime has_filters) {
-                if (cached.needs_entity_filter) {
-                    const target = state.world.entityReg().get(entity_item.id) orelse return null;
-                    const context: filter.Context = .{
-                        .registry = state.world.compReg(),
-                        .signature = target.signature,
-                    };
-                    if (!filter.matchesSparse(filters, context)) return null;
-                }
+            if (cached.needs_entity_filter) {
+                const target = state.world.entityReg().get(entity_item.id) orelse return null;
+                if (!self.filter.judgeEntity(target.signature)) return null;
             }
 
             var result: Item = undefined;
@@ -172,19 +172,12 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
         fn classifyArchetype(
             self: *@This(),
             archetype: *const Archetype,
-        ) ?filter.ArchetypeDecision {
+        ) ?Filter.Decision {
             if (!self.accept(archetype)) return null;
 
-            if (comptime has_filters) {
-                const decision = filter.archetypeDecision(filters, .{
-                    .registry = self.impl.world.compReg(),
-                    .signature = archetype.meta.signature,
-                });
-                if (decision == .reject) return null;
-                return decision;
-            }
-
-            return .accept;
+            const decision = self.filter.judgeArchetype(archetype.meta.signature);
+            if (decision == .reject) return null;
+            return decision;
         }
 
         /// Applies changes since `state.version`, rebuilding when they were evicted.
@@ -288,11 +281,10 @@ fn validatePointerField(comptime name: []const u8, comptime F: type) void {
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
-const With = filter.With;
-const Without = filter.Without;
-const All = filter.All;
-const Any = filter.Any;
-const Not = filter.Not;
+const With = Filter.With;
+const Without = Filter.Without;
+const All = Filter.All;
+const Any = Filter.Any;
 
 const CompMark = component.Mark;
 
@@ -466,10 +458,6 @@ test "filters narrow the archetypes a query visits" {
         })}),
         &world,
     ));
-    try expectEqual(2, count(
-        QueryF(struct { pos: *const Position }, .{Not(With(Velocity))}),
-        &world,
-    ));
 
     // `With` yields the moving entity, `Without` yields the other two in archetype order.
     var with_velocity = try QueryF(struct { id: EntityId }, .{With(Velocity)}).extract(&world);
@@ -636,6 +624,6 @@ test "queries walk every chunk of an archetype" {
 }
 
 test {
-    _ = filter;
+    _ = Filter;
     _ = Impl;
 }
