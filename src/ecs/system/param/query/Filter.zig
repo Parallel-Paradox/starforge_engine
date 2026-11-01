@@ -1,3 +1,15 @@
+//! Compile-time filters compiled into a flat, breadth-first node array.
+//!
+//! `With`/`Without`/`All`/`Any` build a comptime tree of types; `init` normalizes the
+//! root, lays the tree out breadth-first, and snapshots component ids from the
+//! registry. Runtime judging then walks `nodes` without touching comptime data.
+//!
+//! Layout: the root sits at index 0 and every `Branch` owns the contiguous
+//! `child_span` of its direct children, so `end - start == child_cnt`.
+//!
+//! `Node`, `Leaf`, `Branch`, and `Decision` stay public so a runtime builder can
+//! assemble a filter directly instead of going through the comptime constructors.
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -7,7 +19,11 @@ const CompId = engine.ecs.component.Id;
 const Storage = engine.ecs.component.Storage;
 const Signature = engine.ecs.entity.Signature;
 
-nodes: []Node,
+/// A filter that owns no nodes and therefore accepts everything.
+pub const empty: @This() = .{};
+
+/// Breadth-first nodes; empty when the filter matches everything.
+nodes: []Node = &.{},
 
 pub const Node = union(enum) { leaf: Leaf, branch: Branch };
 
@@ -53,7 +69,7 @@ pub const Leaf = struct {
         return self.vtable.judgeEntity(self.comp_id, self.storage, sig);
     }
 
-    pub fn Builder(comptime T: type, comptime require: bool) type {
+    fn Builder(comptime T: type, comptime require: bool) type {
         comptime engine.ecs.component.assertComponent(T, "Filter.Leaf");
 
         return struct {
@@ -70,7 +86,7 @@ pub const Leaf = struct {
                 return sig.has(comp_id) == require;
             }
 
-            pub var vtable: VTable = .{
+            pub const vtable: VTable = .{
                 .judgeArchetype = &_judgeArchetype,
                 .judgeEntity = &_judgeEntity,
             };
@@ -122,7 +138,7 @@ pub const Branch = struct {
 
     pub const Kind = enum { all, any };
 
-    pub fn Builder(comptime kind_: Kind, comptime children_: []const type) type {
+    fn Builder(comptime kind_: Kind, comptime children_: []const type) type {
         if (children_.len == 1) return children_[0];
 
         return struct {
@@ -195,7 +211,7 @@ pub fn init(
     return self;
 }
 
-pub const Empty = struct {
+const Empty = struct {
     pub const node_cnt: usize = 0;
     pub const child_cnt: usize = 0;
     pub const children: [0]type = .{};
@@ -333,7 +349,7 @@ fn judgeEntityAt(nodes: []const Node, index: usize, sig: Signature) bool {
     }
 }
 
-pub fn initWithCount(allocator: Allocator, node_cnt: usize) Allocator.Error!@This() {
+fn initWithCount(allocator: Allocator, node_cnt: usize) Allocator.Error!@This() {
     return .{ .nodes = try allocator.alloc(Node, node_cnt) };
 }
 
