@@ -9,14 +9,15 @@
 //! ```zig
 //! var query = try Query(struct { EntityId, *const Position, *Velocity }).extract(&world);
 //! defer query.deinit();
+//! try query.reset();
 //! while (query.next()) |item| {
 //!     const id, const position, const velocity = item;
 //!     velocity.dx = position.x;
 //! }
 //! ```
 //!
-//! A query caches matching archetypes. `reset` applies structural changes from the
-//! archetype change log and restarts iteration.
+//! A query caches matching archetypes. `reset` must be called before iterating and
+//! after structural changes; it applies the archetype change log and restarts iteration.
 //!
 //! Filters are evaluated per archetype, then per entity when undecided. Every target
 //! component is implicitly required. Items point into component storage and are
@@ -48,7 +49,7 @@ pub fn Query(comptime I: type) type {
 /// A query over entities holding every component in `Item`, narrowed by `filters`.
 ///
 /// `filters` is a tuple of filter types, for example `.{With(Frozen)}`.
-/// Call `reset` after structural changes and `deinit` when done.
+/// Call `reset` before iterating and after structural changes; call `deinit` when done.
 pub fn QueryF(comptime I: type, comptime filters: anytype) type {
     validateTarget(I);
 
@@ -66,13 +67,13 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
     };
 
     return struct {
-        /// Runtime state: filter, target layout, cached archetypes, and cursor.
+        /// Runtime state: filter, target layout, archetype cache, and cursor.
         state: State,
 
         pub const Item = I;
 
-        /// Builds a query over `world` and performs a full state refresh.
-        /// Panics when a target component is not registered. Call `deinit` when done.
+        /// Builds a query over `world`. Call `reset` before `next`, and `deinit` when done.
+        /// Panics when a target component is not registered.
         pub fn extract(world: *World) Allocator.Error!@This() {
             const targets = try world.allocator.alloc(?State.Target, comp_types.len);
             inline for (comp_types, 0..) |maybe, i| {
@@ -90,8 +91,8 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
                 return err;
             };
 
-            // `State` takes ownership of both on success and frees them on failure.
-            return .{ .state = try State.init(world, targets, filter) };
+            // `State` owns `targets` and `filter` from here on.
+            return .{ .state = State.init(world, targets, filter) };
         }
 
         /// Releases the filter tree, target layout, and cached archetypes.
@@ -99,12 +100,13 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
             self.state.deinit();
         }
 
-        /// Refreshes the cached archetypes and restarts iteration.
+        /// Refreshes the sparse set ids and cached archetypes, and restarts iteration.
         pub fn reset(self: *@This()) Allocator.Error!void {
             try self.state.reset();
         }
 
         /// Returns the next matching entity, or null once every archetype was visited.
+        /// Call `reset` at least once before the first call.
         pub fn next(self: *@This()) ?Item {
             while (self.state.next()) |entity_item| {
                 if (self.buildItem(entity_item)) |item| return item;
@@ -130,10 +132,9 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
                         const bytes = entity_item.column(cached.columns[i]);
                         @field(result, name) = @ptrCast(@alignCast(bytes.ptr));
                     } else {
-                        const sparse_entry = state.world.sparseReg().getByType(TypeId.of(T)) orelse
-                            return null;
-                        @field(result, name) = sparse_entry.set.get(T, entity_item.id) orelse
-                            return null;
+                        const sparse_id = state.targets[i].?.sparse_id;
+                        const set = state.world.sparseReg().getById(sparse_id) orelse return null;
+                        @field(result, name) = set.get(T, entity_item.id) orelse return null;
                     }
                 } else {
                     @field(result, name) = entity_item.id;
@@ -209,6 +210,7 @@ const Health = struct {
 fn count(comptime Q: type, world: *World) usize {
     var query = Q.extract(world) catch @panic("test query allocation failed");
     defer query.deinit();
+    query.reset() catch @panic("test query reset failed");
     return drain(&query);
 }
 
@@ -236,6 +238,7 @@ test "queries yield target fields and write through pointers" {
     try expectEqual(2, count(Query(struct { pos: *const Position }), &world));
     var positions = try Query(struct { id: EntityId, pos: *const Position }).extract(&world);
     defer positions.deinit();
+    try positions.reset();
     const first = positions.next().?;
     try expect(first.id.eql(both));
     try expectEqual(1, first.pos.x);
@@ -247,6 +250,7 @@ test "queries yield target fields and write through pointers" {
     // Mutable targets write into component storage.
     var mutable = try Query(struct { pos: *const Position, vel: *Velocity }).extract(&world);
     defer mutable.deinit();
+    try mutable.reset();
     const item = mutable.next().?;
     item.vel.dx = 30;
     item.vel.dy = 40;
@@ -256,6 +260,7 @@ test "queries yield target fields and write through pointers" {
     // A tuple target yields the fields in declaration order.
     var tuple = try Query(struct { EntityId, *const Position, *const Velocity }).extract(&world);
     defer tuple.deinit();
+    try tuple.reset();
     const entity_id, const position, const velocity = tuple.next().?;
     try expect(entity_id.eql(both));
     try expectEqual(1, position.x);
@@ -283,6 +288,7 @@ test "sparse components are matched per entity" {
         health: *Health,
     }).extract(&world);
     defer query.deinit();
+    try query.reset();
 
     const item = query.next().?;
     try expect(item.id.eql(both));
@@ -294,6 +300,7 @@ test "sparse components are matched per entity" {
     // Sparse-only targets visit entities across different archetypes.
     var healths = try Query(struct { id: EntityId, health: *const Health }).extract(&world);
     defer healths.deinit();
+    try healths.reset();
 
     const first = healths.next().?;
     try expect(first.id.eql(both));
@@ -335,6 +342,7 @@ test "sparse components are matched per entity" {
         With(.{ Position, Health }),
     }).extract(&world);
     defer both_required.deinit();
+    try both_required.reset();
     try expect(both_required.next().?.id.eql(both));
     try expect(both_required.next() == null);
 }
@@ -382,6 +390,7 @@ test "filters narrow the archetypes a query visits" {
     // `With` yields the moving entity, `Without` yields the other two in archetype order.
     var with_velocity = try QueryF(struct { id: EntityId }, .{With(Velocity)}).extract(&world);
     defer with_velocity.deinit();
+    try with_velocity.reset();
     try expect(with_velocity.next().?.id.eql(moving));
     try expect(with_velocity.next() == null);
 
@@ -389,6 +398,7 @@ test "filters narrow the archetypes a query visits" {
         Without(Velocity),
     }).extract(&world);
     defer without_velocity.deinit();
+    try without_velocity.reset();
     try expect(without_velocity.next().?.id.eql(still));
     try expect(without_velocity.next().?.id.eql(frozen));
     try expect(without_velocity.next() == null);
@@ -403,6 +413,7 @@ test "reset refreshes the cached archetypes" {
 
     var query = try Query(struct { pos: *const Position }).extract(&world);
     defer query.deinit();
+    try query.reset();
     try expectEqual(1, drain(&query));
 
     // A new matching archetype is picked up incrementally.
@@ -459,6 +470,7 @@ test "queries walk every chunk of an archetype" {
         small: *const Small,
     }).extract(&world);
     defer query.deinit();
+    try query.reset();
 
     var visited: usize = 0;
     while (query.next()) |item| : (visited += 1) {
@@ -471,6 +483,7 @@ test "queries walk every chunk of an archetype" {
 
     var reread = try Query(struct { big: *const Big }).extract(&world);
     defer reread.deinit();
+    try reread.reset();
     while (reread.next()) |item| {
         try expectEqual(0xFF, item.big.bytes[0]);
     }

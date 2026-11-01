@@ -11,6 +11,7 @@ const Signature = engine.ecs.entity.Signature;
 const ArchetypeId = engine.ecs.entity.archetype.Id;
 const ArchetypeIter = engine.ecs.entity.archetype.Iter;
 const ArchetypeRegistry = engine.ecs.entity.archetype.Registry;
+const SparseSetId = engine.ecs.entity.sparse_set.Id;
 const TypeId = engine.reflect.TypeId;
 
 const Filter = @import("Filter.zig");
@@ -19,10 +20,13 @@ const Filter = @import("Filter.zig");
 pub const Target = struct {
     /// Registered id of the component.
     id: CompId,
-    /// Component type key used for archetype column lookup.
+    /// Component type key used for archetype column and sparse-set lookup.
     type_id: TypeId,
     /// Where the component is stored.
     storage: Storage,
+    /// Sparse set id resolved by `reset`; invalid when the component is
+    /// archetype-stored or no sparse set exists yet.
+    sparse_id: SparseSetId = .invalid,
 };
 
 pub const Cache = struct {
@@ -48,14 +52,11 @@ current_index: usize = 0,
 /// Iterator over the current archetype; null while seeking one.
 iter: ?ArchetypeIter = null,
 
-/// Builds runtime state and refreshes the cached archetypes.
-/// Takes ownership of `targets` and `filter` even when it fails; both must be
-/// allocated with `world.allocator`, and ownership passes to `deinit`.
-pub fn init(world: *World, targets: []?Target, filter: Filter) Allocator.Error!@This() {
-    var self: @This() = .{ .world = world, .targets = targets, .filter = filter };
-    errdefer self.deinit();
-    try self.reset();
-    return self;
+/// Builds runtime state, taking ownership of `targets` and `filter`.
+/// Both must be allocated with `world.allocator`; `deinit` releases them.
+/// Call `reset` before iterating to fill the archetype cache.
+pub fn init(world: *World, targets: []?Target, filter: Filter) @This() {
+    return .{ .world = world, .targets = targets, .filter = filter };
 }
 
 /// Removes every cached archetype, releasing its cached columns.
@@ -74,10 +75,20 @@ pub fn deinit(self: *@This()) void {
     self.caches.deinit(self.world.allocator);
 }
 
-/// Refreshes the cached archetypes and restarts iteration.
+/// Refreshes the sparse set ids and the cached archetypes, and restarts iteration.
 /// Applies change-log entries incrementally; rebuilds when the query version is
 /// outside the retained log window.
 pub fn reset(self: *@This()) Allocator.Error!void {
+    for (self.targets) |*maybe| {
+        if (maybe.*) |*target| {
+            if (target.storage != .sparse_set) continue;
+            target.sparse_id = if (self.world.sparseReg().getByType(target.type_id)) |entry|
+                entry.id
+            else
+                .invalid;
+        }
+    }
+
     try self.updateState();
     self.current_index = 0;
     self.iter = null;
