@@ -14,12 +14,20 @@ const TypeId = reflect.TypeId;
 
 pub const Entry = struct {
     id: CompId = .invalid,
+    /// An invalid metadata type id means the entry is only reserved.
     meta: CompMeta = .{},
 };
 
-pub const Error = Allocator.Error || error{
+pub const RegisterError = Allocator.Error || TypeId.ValidateError || error{
     /// The type is already registered with different metadata.
     ConflictingMeta,
+    /// A requirement is unknown, stale, duplicated, or refers to the component itself.
+    InvalidRequirement,
+};
+
+pub const UnregisterError = Allocator.Error || error{
+    /// Another component still requires this id.
+    ComponentRequired,
 };
 
 type_to_id: std.AutoHashMapUnmanaged(TypeId, CompId) = .empty,
@@ -32,31 +40,79 @@ pub fn init(allocator: Allocator) @This() {
 }
 
 pub fn deinit(self: *@This()) void {
+    for (self.entries.items) |*entry| entry.meta.deinit(self.allocator);
     self.type_to_id.deinit(self.allocator);
     self.entries.deinit(self.allocator);
     self.retired.deinit(self.allocator);
 }
 
-/// Registers `T` and returns its component id, or the existing one.
-pub fn register(self: *@This(), comptime T: type) Error!CompId {
-    return self.registerMeta(CompMeta.of(T));
+/// Registers `T` and its requirement closure, returning `T`'s component id.
+/// All ids are reserved before metadata is built, so dependency cycles are supported.
+/// On failure, existing registrations and reservations are left unchanged.
+pub fn register(self: *@This(), comptime T: type) RegisterError!CompId {
+    const types = comptime [1]type{T} ++ component.requireClosure(T);
+    const entries_len = self.entries.items.len;
+    var added: [types.len]TypeId = undefined;
+    var added_count: usize = 0;
+    errdefer {
+        var i = added_count;
+        while (i > 0) {
+            i -= 1;
+            const type_id = added[i];
+            const id = self.getById(type_id).?;
+            const entry = &self.entries.items[id.index.get()];
+            _ = self.type_to_id.remove(type_id);
+            entry.meta.deinit(self.allocator);
+            entry.* = .{};
+            // Restore reused ids in reverse reservation order, without allocating.
+            if (id.index.get() < entries_len) self.retired.appendAssumeCapacity(id);
+        }
+        self.entries.shrinkRetainingCapacity(entries_len);
+    }
+
+    inline for (types) |U| {
+        if (self.getByType(U) == null) {
+            const type_id = TypeId.of(U);
+            _ = try self.reserve(type_id);
+            added[added_count] = type_id;
+            added_count += 1;
+        }
+    }
+
+    var meta_list: [types.len]CompMeta = undefined;
+    var meta_count: usize = 0;
+    defer for (meta_list[0..meta_count]) |*meta| meta.deinit(self.allocator);
+    inline for (types) |U| {
+        meta_list[meta_count] = try CompMeta.init(U, self.allocator, self);
+        meta_count += 1;
+        const entry = self.entries.items[self.getByType(U).?.index.get()];
+        if (entry.meta.typeId().isValid() and !entry.meta.eql(meta_list[meta_count - 1])) {
+            return RegisterError.ConflictingMeta;
+        }
+    }
+
+    // Nothing below can fail; publish metadata only after every component is ready.
+    inline for (types, 0..) |U, i| {
+        const entry = &self.entries.items[self.getByType(U).?.index.get()];
+        if (!entry.meta.typeId().isValid()) {
+            entry.meta = meta_list[i];
+            meta_list[i] = .{};
+        }
+    }
+    return self.getByType(T).?;
 }
 
-/// Registers `meta` and returns its component id, or the existing one.
-pub fn registerMeta(self: *@This(), meta: CompMeta) Error!CompId {
-    const type_id = meta.typeId();
-    if (self.type_to_id.get(type_id)) |id| {
-        if (!self.entries.items[id.index.get()].meta.eql(meta)) {
-            return Error.ConflictingMeta;
-        }
-        return id;
-    }
+/// Reserves an id for `type_id`, or returns its existing id.
+/// Lookup by type can see reservations, but `getMeta` returns null until `registerMeta`.
+/// Runtime callers can reserve every type first, then register metadata containing cycles.
+pub fn reserve(self: *@This(), type_id: TypeId) Allocator.Error!CompId {
+    if (self.type_to_id.get(type_id)) |id| return id;
 
     if (self.retired.items.len > 0) {
         const id = self.retired.getLast();
         try self.type_to_id.put(self.allocator, type_id, id);
         _ = self.retired.pop();
-        self.entries.items[id.index.get()] = .{ .id = id, .meta = meta };
+        self.entries.items[id.index.get()] = .{ .id = id };
         return id;
     }
 
@@ -64,18 +120,59 @@ pub fn registerMeta(self: *@This(), meta: CompMeta) Error!CompId {
     try self.entries.ensureUnusedCapacity(self.allocator, 1);
     try self.type_to_id.ensureUnusedCapacity(self.allocator, 1);
 
-    self.entries.appendAssumeCapacity(.{ .id = id, .meta = meta });
+    self.entries.appendAssumeCapacity(.{ .id = id });
     self.type_to_id.putAssumeCapacityNoClobber(type_id, id);
     return id;
 }
 
+/// Registers `meta` and returns its component id, or the existing one.
+/// Requirements must refer to ids reserved in this registry; metadata may still be pending.
+/// Copies the requirement array. The caller retains ownership of `meta` on every path.
+pub fn registerMeta(self: *@This(), meta: CompMeta) RegisterError!CompId {
+    const type_id = meta.typeId();
+    try type_id.validate();
+    const own_id = self.getById(type_id) orelse CompId.invalid;
+    for (meta.require, 0..) |required, i| {
+        const index: usize = required.index.tryGet() orelse return RegisterError.InvalidRequirement;
+        if (index >= self.entries.items.len) return RegisterError.InvalidRequirement;
+        const entry = self.entries.items[index];
+        if (!entry.id.eql(required) or required.eql(own_id)) {
+            return RegisterError.InvalidRequirement;
+        }
+        for (meta.require[0..i]) |previous| {
+            if (previous.eql(required)) return RegisterError.InvalidRequirement;
+        }
+    }
+
+    if (self.type_to_id.get(type_id)) |id| {
+        const entry = self.entries.items[id.index.get()];
+        if (entry.meta.typeId().isValid()) {
+            if (!entry.meta.eql(meta)) return RegisterError.ConflictingMeta;
+            return id;
+        }
+    }
+
+    var owned = meta;
+    owned.require = try self.allocator.dupe(CompId, meta.require);
+    errdefer owned.deinit(self.allocator);
+    const id = try self.reserve(type_id);
+    self.entries.items[id.index.get()] = .{ .id = id, .meta = owned };
+    return id;
+}
+
 /// Unregisters `type_id`, retiring its id for reuse.
-/// Does nothing if not registered.
-pub fn unregister(self: *@This(), type_id: TypeId) Allocator.Error!void {
+/// Does nothing if unknown. Rejects ids still required by another component.
+pub fn unregister(self: *@This(), type_id: TypeId) UnregisterError!void {
     const id = self.type_to_id.get(type_id) orelse return;
+    for (self.entries.items) |entry| {
+        for (entry.meta.require) |required| {
+            if (required.eql(id)) return UnregisterError.ComponentRequired;
+        }
+    }
     try self.retired.ensureUnusedCapacity(self.allocator, 1);
 
     _ = self.type_to_id.remove(type_id);
+    self.entries.items[id.index.get()].meta.deinit(self.allocator);
     self.entries.items[id.index.get()] = .{};
     self.retired.appendAssumeCapacity(.{
         .index = id.index,
@@ -83,23 +180,24 @@ pub fn unregister(self: *@This(), type_id: TypeId) Allocator.Error!void {
     });
 }
 
-/// Returns the component id registered for `T`, or null if it is unknown.
+/// Returns the component id registered or reserved for `T`, or null if unknown.
 pub fn getByType(self: *const @This(), comptime T: type) ?CompId {
     return self.getById(TypeId.of(T));
 }
 
-/// Returns the component id registered for `type_id`, or null if it is unknown.
+/// Returns the component id registered or reserved for `type_id`, or null if unknown.
 pub fn getById(self: *const @This(), type_id: TypeId) ?CompId {
     return self.type_to_id.get(type_id);
 }
 
-/// Returns the metadata registered for `comp_id`, or null if it is unknown.
+/// Returns borrowed metadata, or null if the id is unknown, stale, or only reserved.
+/// Its requirement array must not be freed or mutated and is invalidated by unregister.
 pub fn getMeta(self: *const @This(), comp_id: CompId) ?CompMeta {
     const index: usize = comp_id.index.tryGet() orelse return null;
     if (index >= self.entries.items.len) return null;
 
     const entry = self.entries.items[index];
-    if (!entry.id.eql(comp_id)) return null;
+    if (!entry.id.eql(comp_id) or !entry.meta.typeId().isValid()) return null;
     return entry.meta;
 }
 
@@ -112,6 +210,7 @@ pub fn getMetaByType(self: *const @This(), type_id: TypeId) ?CompMeta {
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectError = std.testing.expectError;
+const checkAllAllocationFailures = std.testing.checkAllAllocationFailures;
 
 const U32 = struct {
     pub const se_component: CompMark = .{};
@@ -123,85 +222,252 @@ const I32 = struct {
     value: i32,
 };
 
-test "register assigns one id per type" {
-    var registry = init(std.testing.allocator);
-    defer registry.deinit();
-
-    const first = try registry.register(U32);
-    const second = try registry.register(I32);
-
-    try expectEqual(0, first.index.get());
-    try expectEqual(1, second.index.get());
-    try expectEqual(0, first.generation.get());
-
-    try expect(first.eql(try registry.register(U32)));
-    try expect(first.eql(try registry.registerMeta(CompMeta.of(U32))));
-    try expect(!first.eql(second));
-}
-
-test "unregister retires the id for reuse" {
+test "registration is idempotent, supports lookup and reuses ids with new generations" {
     var registry = init(std.testing.allocator);
     defer registry.deinit();
 
     try registry.unregister(TypeId.of(I32));
-
-    const first = try registry.register(U32);
-    try registry.unregister(TypeId.of(U32));
-
-    const second = try registry.register(U32);
-    try expectEqual(first.index.get(), second.index.get());
-    try expectEqual(first.generation.get() + 1, second.generation.get());
-    try expect(!first.eql(second));
-}
-
-test "getMeta looks up by component id and type id" {
-    var registry = init(std.testing.allocator);
-    defer registry.deinit();
-
-    const id = try registry.register(U32);
-    const meta = CompMeta.of(U32);
-
-    try expect(meta.eql(registry.getMeta(id).?));
-    try expect(meta.eql(registry.getMetaByType(TypeId.of(U32)).?));
-
-    try expect(registry.getMeta(CompId.invalid) == null);
-    try expect(registry.getMetaByType(TypeId.of(I32)) == null);
-
-    try registry.unregister(TypeId.of(U32));
-    try expect(registry.getMeta(id) == null);
-    try expect(registry.getMetaByType(TypeId.of(U32)) == null);
-
-    const reused = try registry.register(U32);
-    try expect(registry.getMeta(id) == null);
-    try expect(registry.getMeta(reused) != null);
-}
-
-test "registerMeta rejects conflicting metadata" {
-    var registry = init(std.testing.allocator);
-    defer registry.deinit();
-
-    const meta = CompMeta.of(U32);
-    _ = try registry.registerMeta(meta);
-
-    var conflicting = meta;
-    conflicting.storage = .sparse_set;
-
-    try expectError(Error.ConflictingMeta, registry.registerMeta(conflicting));
-}
-
-test "getByType and getById look up component ids" {
-    var registry = init(std.testing.allocator);
-    defer registry.deinit();
-
-    const id = try registry.register(U32);
-    try expect(id.eql(registry.getByType(U32).?));
-    try expect(id.eql(registry.getById(TypeId.of(U32)).?));
-
     try expect(registry.getByType(I32) == null);
     try expect(registry.getById(TypeId.of(I32)) == null);
     try expect(registry.getById(TypeId.invalid) == null);
+    try expect(registry.getMeta(CompId.invalid) == null);
+    try expect(registry.getMetaByType(TypeId.of(I32)) == null);
+
+    const id = try registry.register(U32);
+    const other = try registry.register(I32);
+    try expectEqual(0, id.index.get());
+    try expectEqual(1, other.index.get());
+    try expectEqual(0, id.generation.get());
+    try expect(!id.eql(other));
+    try expect(id.eql(try registry.register(U32)));
+    try expect(id.eql(registry.getByType(U32).?));
+    try expect(id.eql(registry.getById(TypeId.of(U32)).?));
+    var meta = try CompMeta.init(U32, std.testing.allocator, &registry);
+    defer meta.deinit(std.testing.allocator);
+    try expect(id.eql(try registry.registerMeta(meta)));
+    try expect(meta.eql(registry.getMeta(id).?));
+    try expect(meta.eql(registry.getMetaByType(TypeId.of(U32)).?));
 
     try registry.unregister(TypeId.of(U32));
     try expect(registry.getByType(U32) == null);
     try expect(registry.getById(TypeId.of(U32)) == null);
+    try expect(registry.getMeta(id) == null);
+    try expect(registry.getMetaByType(TypeId.of(U32)) == null);
+    const reused = try registry.register(U32);
+    try expectEqual(id.index.get(), reused.index.get());
+    try expectEqual(id.generation.get() + 1, reused.generation.get());
+    try expect(!id.eql(reused));
+    try expect(registry.getMeta(id) == null);
+    try expect(registry.getMeta(reused) != null);
+}
+
+const Graph = struct {
+    const D = struct {
+        pub const se_component: CompMark = .{};
+    };
+    const B = struct {
+        pub const se_component: CompMark = .{ .require = &.{D} };
+    };
+    const C = struct {
+        pub const se_component: CompMark = .{ .require = &.{D} };
+    };
+    const A = struct {
+        pub const se_component: CompMark = .{ .require = &.{ B, C } };
+    };
+};
+
+test "register resolves the full graph but stores only direct requirements" {
+    var registry = init(std.testing.allocator);
+    defer registry.deinit();
+
+    const a = try registry.register(Graph.A);
+    const b = registry.getByType(Graph.B).?;
+    const c = registry.getByType(Graph.C).?;
+    const d = registry.getByType(Graph.D).?;
+    const requirements = registry.getMeta(a).?.require;
+    try std.testing.expectEqualSlices(CompId, &.{ b, c }, requirements);
+    try std.testing.expectEqualSlices(CompId, &.{d}, registry.getMeta(b).?.require);
+    try std.testing.expectEqualSlices(CompId, &.{d}, registry.getMeta(c).?.require);
+    try expectEqual(0, registry.getMeta(d).?.require.len);
+    try expectEqual(4, registry.type_to_id.count());
+
+    try expect(a.eql(try registry.register(Graph.A)));
+    try expect(requirements.ptr == registry.getMeta(a).?.require.ptr);
+}
+
+test "register supports cycles without exposing incomplete metadata" {
+    const Cycle = struct {
+        const A = struct {
+            pub const se_component: CompMark = .{ .require = &.{B} };
+        };
+        const B = struct {
+            pub const se_component: CompMark = .{ .require = &.{C} };
+        };
+        const C = struct {
+            pub const se_component: CompMark = .{ .require = &.{A} };
+        };
+    };
+    var registry = init(std.testing.allocator);
+    defer registry.deinit();
+
+    const a = try registry.reserve(TypeId.of(Cycle.A));
+    try expect(registry.getMeta(a) == null);
+    try expect(a.eql(try registry.register(Cycle.A)));
+    const b = registry.getByType(Cycle.B).?;
+    const c = registry.getByType(Cycle.C).?;
+    try expect(registry.getMeta(a).?.require[0].eql(b));
+    try expect(registry.getMeta(b).?.require[0].eql(c));
+    try expect(registry.getMeta(c).?.require[0].eql(a));
+    try expect(b.eql(try registry.register(Cycle.B)));
+}
+
+test "runtime registration resolves reserved ids and owns requirement copies" {
+    var registry = init(std.testing.allocator);
+    defer registry.deinit();
+
+    const a = try registry.reserve(TypeId.of(U32));
+    const b = try registry.reserve(TypeId.of(I32));
+    try expect(a.eql(try registry.reserve(TypeId.of(U32))));
+    try expect(registry.getMeta(a) == null);
+    try expect(registry.getMetaByType(TypeId.of(I32)) == null);
+
+    var requirements = [_]CompId{b};
+    const meta: CompMeta = .{ .type_meta = reflect.TypeMeta.of(U32), .require = &requirements };
+    try expect(a.eql(try registry.registerMeta(meta)));
+    try expect(registry.getMetaByType(TypeId.of(I32)) == null);
+    requirements[0] = a;
+    try expect(registry.getMeta(a).?.require[0].eql(b));
+    _ = try registry.registerMeta(.{
+        .type_meta = reflect.TypeMeta.of(I32),
+        .require = &requirements,
+    });
+    try expect(registry.getMeta(b).?.require[0].eql(a));
+
+    requirements[0] = b;
+    try expect(a.eql(try registry.registerMeta(meta)));
+}
+
+test "registerMeta rejects invalid type ids, requirements and metadata conflicts" {
+    var registry = init(std.testing.allocator);
+    defer registry.deinit();
+
+    try expectError(error.InvalidAddress, registry.registerMeta(.{}));
+    try expectEqual(0, registry.type_to_id.count());
+    const a = try registry.reserve(TypeId.of(U32));
+    const b = try registry.register(I32);
+    var requirements = [_]CompId{ b, b };
+    var meta: CompMeta = .{ .type_meta = reflect.TypeMeta.of(U32), .require = &requirements };
+    try expectError(RegisterError.InvalidRequirement, registry.registerMeta(meta));
+    meta.require = requirements[0..1];
+    for ([_]CompId{
+        CompId.invalid,
+        CompId.init(100, 0),
+        CompId.init(b.index.get(), b.generation.get() + 1),
+        a,
+    }) |invalid| {
+        requirements[0] = invalid;
+        try expectError(RegisterError.InvalidRequirement, registry.registerMeta(meta));
+    }
+    try expect(registry.getMeta(a) == null);
+
+    requirements[0] = b;
+    _ = try registry.registerMeta(meta);
+    var conflicting = meta;
+    conflicting.storage = .sparse_set;
+    try expectError(RegisterError.ConflictingMeta, registry.registerMeta(conflicting));
+    meta.require = &.{};
+    try expectError(RegisterError.ConflictingMeta, registry.registerMeta(meta));
+}
+
+test "unregister protects required ids and frees dependency metadata" {
+    var registry = init(std.testing.allocator);
+    defer registry.deinit();
+
+    _ = try registry.register(Graph.B);
+    const old_d = registry.getByType(Graph.D).?;
+    try expectError(UnregisterError.ComponentRequired, registry.unregister(TypeId.of(Graph.D)));
+    try expect(registry.getMeta(old_d) != null);
+    try registry.unregister(TypeId.of(Graph.B));
+    try registry.unregister(TypeId.of(Graph.D));
+
+    _ = try registry.register(Graph.B);
+    const new_d = registry.getByType(Graph.D).?;
+    try expect(!old_d.eql(new_d));
+    const new_b = registry.getByType(Graph.B).?;
+    try expect(registry.getMeta(new_b).?.require[0].eql(new_d));
+}
+
+test "register rolls back new reservations on metadata conflicts" {
+    var registry = init(std.testing.allocator);
+    defer registry.deinit();
+
+    const a = try registry.registerMeta(.{
+        .type_meta = reflect.TypeMeta.of(Graph.A),
+        .storage = .sparse_set,
+    });
+    try expectError(RegisterError.ConflictingMeta, registry.register(Graph.A));
+    try expectEqual(1, registry.entries.items.len);
+    try expectEqual(1, registry.type_to_id.count());
+    try expectEqual(component.Storage.sparse_set, registry.getMeta(a).?.storage);
+    try expect(registry.getByType(Graph.B) == null);
+    try expect(registry.getByType(Graph.C) == null);
+    try expect(registry.getByType(Graph.D) == null);
+}
+
+fn testRegisterAllocationFailures(allocator: Allocator) !void {
+    var registry = init(allocator);
+    defer registry.deinit();
+
+    const Extra = struct {
+        pub const se_component: CompMark = .{};
+    };
+    const existing = try registry.register(U32);
+    _ = try registry.register(I32);
+    _ = try registry.register(Extra);
+    const reserved = try registry.reserve(TypeId.of(Graph.B));
+    try registry.unregister(TypeId.of(I32));
+    try registry.unregister(TypeId.of(Extra));
+    const retired = registry.retired.getLast();
+    const first_retired = registry.retired.items[0];
+    const entries_len = registry.entries.items.len;
+
+    const a = registry.register(Graph.A) catch |err| {
+        try expectEqual(entries_len, registry.entries.items.len);
+        try expectEqual(2, registry.type_to_id.count());
+        try expectEqual(2, registry.retired.items.len);
+        try expect(registry.retired.items[0].eql(first_retired));
+        try expect(registry.retired.getLast().eql(retired));
+        try expect(registry.getMeta(existing) != null);
+        try expect(registry.getByType(Graph.B).?.eql(reserved));
+        try expect(registry.getMeta(reserved) == null);
+        try expect(registry.getByType(Graph.A) == null);
+        try expect(registry.getByType(Graph.C) == null);
+        try expect(registry.getByType(Graph.D) == null);
+        return err;
+    };
+    try expect(a.eql(retired));
+    try expect(registry.getMeta(reserved) != null);
+}
+
+fn testRegisterMetaAllocationFailures(allocator: Allocator) !void {
+    var registry = init(allocator);
+    defer registry.deinit();
+
+    const dependency = try registry.reserve(TypeId.of(I32));
+    var requirements = [_]CompId{dependency};
+    const meta: CompMeta = .{ .type_meta = reflect.TypeMeta.of(U32), .require = &requirements };
+    const id = registry.registerMeta(meta) catch |err| {
+        try expectEqual(1, registry.type_to_id.count());
+        try expect(registry.getByType(U32) == null);
+        try expect(registry.getByType(I32).?.eql(dependency));
+        try expect(registry.getMeta(dependency) == null);
+        try expect(requirements[0].eql(dependency));
+        return err;
+    };
+    try expect(registry.getMeta(id).?.require[0].eql(dependency));
+}
+
+test "allocation failures preserve ready and pending entries, retired id order and borrowed input" {
+    try checkAllAllocationFailures(std.testing.allocator, testRegisterAllocationFailures, .{});
+    try checkAllAllocationFailures(std.testing.allocator, testRegisterMetaAllocationFailures, .{});
 }

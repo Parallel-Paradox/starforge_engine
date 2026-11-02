@@ -56,7 +56,7 @@ pub fn sparseReg(self: *@This()) *SparseSetRegistry {
 pub fn addEntity(
     self: *@This(),
     fields: anytype,
-) (EntityRegistry.Error || ComponentRegistry.Error)!EntityId {
+) (EntityRegistry.Error || ComponentRegistry.RegisterError)!EntityId {
     const types = Bundle.flatTypes(@TypeOf(fields));
     comptime {
         for (types) |T| component.assertComponent(T, "addEntity");
