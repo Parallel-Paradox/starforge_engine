@@ -28,6 +28,9 @@ In that case, bypass the proxy for the fetch when fetching or first building:
 env -u https_proxy -u HTTPS_PROXY -u http_proxy -u HTTP_PROXY zig build test
 ```
 
+Bypassing the proxy may instead fail with `TlsInitializationFailed`. If that happens,
+you could use curl to fetch the package and place it manually in `zig-pkg/`.
+
 ## AGENT
 
 - Project skills live in `skills/`.
