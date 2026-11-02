@@ -50,13 +50,13 @@ pub fn sparseReg(self: *@This()) *SparseSetRegistry {
 ///
 /// Every field type must be a component, or a struct marked as a bundle whose fields are
 /// flattened recursively; anything else is a compile error. Component types are registered
-/// before the bundle is built.
+/// before the bundle is built. The entity registry default-constructs missing requirements.
 ///
-/// On failure the caller keeps ownership of `fields`.
+/// On failure the caller keeps ownership of `fields`; successful type registrations remain.
 pub fn addEntity(
     self: *@This(),
     fields: anytype,
-) (EntityRegistry.Error || ComponentRegistry.RegisterError)!EntityId {
+) (EntityRegistry.AddBundleError || ComponentRegistry.RegisterError)!EntityId {
     const types = Bundle.flatTypes(@TypeOf(fields));
     comptime {
         for (types) |T| component.assertComponent(T, "addEntity");
@@ -69,11 +69,10 @@ pub fn addEntity(
     return self.addBundle(bundle);
 }
 
-/// Creates an entity from an already-built bundle.
-///
-/// Every component type in `bundle` must already be registered, for example by `addEntity`;
-/// otherwise `UnknownComponentType` is returned.
-pub fn addBundle(self: *@This(), bundle: Bundle) EntityRegistry.Error!EntityId {
+/// Creates an entity from a bundle, delegating requirement completion to the entity registry.
+/// Input component types must already be registered. Explicit values override defaults.
+/// On failure the caller retains the unchanged bundle and its values.
+pub fn addBundle(self: *@This(), bundle: Bundle) EntityRegistry.AddBundleError!EntityId {
     return self.entity_reg.addBundle(bundle);
 }
 
@@ -128,6 +127,25 @@ test "addEntity registers components and creates an entity" {
 
     // A non-component field is a compile error:
     // _ = world.addEntity(.{ @as(u32, 1) });
+}
+
+test "addEntity and addBundle delegate requirement completion to the entity registry" {
+    const Required = struct {
+        pub const se_component: TestMark = .{ .storage = .sparse_set };
+        value: u32 = 7,
+    };
+    const Root = struct {
+        pub const se_component: TestMark = .{ .require = &.{Required} };
+    };
+    const allocator = std.testing.allocator;
+    var world = init(allocator);
+    defer world.deinit();
+
+    const first = try world.addEntity(.{Root{}});
+    const second = try world.addBundle(try Bundle.init(allocator, .{Root{}}));
+    const required = world.compReg().getByType(Required).?;
+    try expect(world.entityReg().get(first).?.signature.has(required));
+    try expect(world.entityReg().get(second).?.signature.has(required));
 }
 
 test "addEntity releases the temporary bundle without disposing copied values" {

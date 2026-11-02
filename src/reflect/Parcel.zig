@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 
 const engine = @import("engine");
 const TypeMeta = engine.reflect.TypeMeta;
+const Default = engine.reflect.Default;
 
 meta: TypeMeta = .{},
 ptr: ?[*]u8 = null,
@@ -45,15 +46,32 @@ pub fn init(allocator: Allocator, value: anytype) Allocator.Error!@This() {
 
     const S = StorageOf(T);
     const meta = TypeMeta.of(S);
+    const parcel = try allocate(allocator, meta);
+    const typed: *S = @ptrCast(@alignCast(parcel.ptr.?));
+    typed.* = value;
+    return parcel;
+}
+
+/// Constructs a fresh value using runtime metadata and a matching default factory.
+/// On failure, frees uninitialized storage without running the value's deinit.
+pub fn initDefault(
+    allocator: Allocator,
+    meta: TypeMeta,
+    default: Default,
+) (Allocator.Error || Default.Error)!@This() {
+    var parcel = try allocate(allocator, meta);
+    errdefer parcel.releaseStorage(allocator);
+    try default.fill(parcel.bytes());
+    return parcel;
+}
+
+fn allocate(allocator: Allocator, meta: TypeMeta) Allocator.Error!@This() {
     const ptr: [*]u8 = if (meta.size == 0)
         // Non-null so `deinit` still runs the value's deinit; never allocated or freed.
         @ptrFromInt(meta.alignment.toByteUnits())
     else
         allocator.rawAlloc(meta.size, meta.alignment, @returnAddress()) orelse
             return error.OutOfMemory;
-
-    const typed: *S = @ptrCast(@alignCast(ptr));
-    typed.* = value;
     return .{ .meta = meta, .ptr = ptr };
 }
 
@@ -100,84 +118,84 @@ fn freeStorage(self: *@This(), allocator: Allocator) void {
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectEqualSlices = std.testing.expectEqualSlices;
+const expectError = std.testing.expectError;
 
 const Probe = struct {
-    calls: *usize,
+    value: u32 align(64) = 42,
+    var calls: usize = 0;
 
     pub fn deinit(self: *@This()) void {
-        self.calls.* += 1;
+        _ = self;
+        calls += 1;
     }
 };
 
-fn expectStored(parcel: @This(), comptime T: type, expected: T) !void {
-    const value: *T = @ptrCast(@alignCast(parcel.ptr.?));
-    try expectEqual(expected, value.*);
-}
-
-test "init stores values under their storage type" {
+test "init normalizes storage types and canStore rejects comptime-only types" {
     const allocator = std.testing.allocator;
-
-    const stored: u64 = 42;
-    var typed = try init(allocator, stored);
-    defer typed.deinit(allocator);
-    try expect(typed.meta.eql(TypeMeta.of(u64)));
-    try expectEqual(@sizeOf(u64), typed.meta.size);
-    try expectStored(typed, u64, 42);
-    try expectEqualSlices(u8, std.mem.asBytes(&stored), typed.bytes());
-
-    var integer = try init(allocator, 42);
-    defer integer.deinit(allocator);
-    try expect(integer.meta.eql(TypeMeta.of(isize)));
-    try expectStored(integer, isize, 42);
-
-    var negative = try init(allocator, -42);
-    defer negative.deinit(allocator);
-    try expectStored(negative, isize, -42);
-
-    var fraction = try init(allocator, 3.5);
-    defer fraction.deinit(allocator);
-    try expect(fraction.meta.eql(TypeMeta.of(f64)));
-    try expectStored(fraction, f64, 3.5);
-}
-
-test "canStore accepts comptime numbers and rejects comptime-only types" {
-    try expect(canStore(comptime_int));
-    try expect(canStore(comptime_float));
+    inline for (.{
+        .{ @as(u64, 42), u64 },
+        .{ 42, isize },
+        .{ -42, isize },
+        .{ 3.5, f64 },
+    }) |entry| {
+        const S = entry[1];
+        const value: S = entry[0];
+        var parcel = try init(allocator, entry[0]);
+        defer parcel.deinit(allocator);
+        try expect(canStore(@TypeOf(entry[0])));
+        try expect(parcel.meta.eql(TypeMeta.of(S)));
+        try expectEqualSlices(u8, std.mem.asBytes(&value), parcel.bytes());
+    }
     try expect(!canStore(type));
     try expect(!canStore(@TypeOf(null)));
     try expect(!canStore(noreturn));
 }
 
-test "deinit runs the value's deinit, releaseStorage only frees storage" {
+test "initDefault constructs aligned values and cleans up mismatched factories" {
     const allocator = std.testing.allocator;
-    var calls: usize = 0;
+    Probe.calls = 0;
+    const meta = TypeMeta.of(Probe);
+    var parcel = try initDefault(allocator, meta, Default.init(Probe).?);
+    defer parcel.deinit(allocator);
+    try expect(parcel.meta.eql(meta));
+    try expectEqual(@sizeOf(Probe), parcel.bytes().len);
+    try expectEqual(0, @intFromPtr(parcel.ptr.?) % @alignOf(Probe));
+    const value: *Probe = @ptrCast(@alignCast(parcel.ptr.?));
+    try expectEqual(42, value.value);
+    try expectError(
+        error.BufferSizeMismatch,
+        initDefault(allocator, meta, Default.init(struct {}).?),
+    );
+    try expectEqual(0, Probe.calls);
+    parcel.deinit(allocator);
+    try expectEqual(1, Probe.calls);
+}
 
-    var disposed = try init(allocator, Probe{ .calls = &calls });
+test "deinit disposes while releaseStorage and take transfer ownership" {
+    const allocator = std.testing.allocator;
+    Probe.calls = 0;
+    var disposed = try init(allocator, Probe{});
     disposed.deinit(allocator);
-    try expectEqual(1, calls);
+    disposed.deinit(allocator);
+    try expectEqual(1, Probe.calls);
     try expect(disposed.ptr == null);
     try expectEqual(0, disposed.bytes().len);
 
-    var released = try init(allocator, Probe{ .calls = &calls });
+    var released = try init(allocator, Probe{});
     released.releaseStorage(allocator);
-    try expectEqual(1, calls);
+    try expectEqual(1, Probe.calls);
     try expect(released.ptr == null);
-}
 
-test "take moves the value out without running its deinit" {
-    const allocator = std.testing.allocator;
-    var calls: usize = 0;
-    var parcel = try init(allocator, Probe{ .calls = &calls });
-
+    var parcel = try init(allocator, Probe{});
     var value = parcel.take(Probe, allocator);
-    try expectEqual(0, calls);
+    try expectEqual(42, value.value);
+    try expectEqual(1, Probe.calls);
     try expect(parcel.ptr == null);
-
     value.deinit();
-    try expectEqual(1, calls);
+    try expectEqual(2, Probe.calls);
 }
 
-test "zero-size value owns no memory but still runs its deinit" {
+test "typed and runtime zero-size values still run deinit exactly once" {
     const allocator = std.testing.allocator;
     const Empty = struct {
         var calls: usize = 0;
@@ -187,11 +205,18 @@ test "zero-size value owns no memory but still runs its deinit" {
             calls += 1;
         }
     };
-
-    var parcel = try init(allocator, Empty{});
-    try expectEqual(0, parcel.bytes().len);
-    parcel.deinit(allocator);
-
-    try expectEqual(1, Empty.calls);
-    try expect(parcel.ptr == null);
+    for ([_]bool{ false, true }) |runtime| {
+        Empty.calls = 0;
+        var parcel = if (runtime)
+            try initDefault(allocator, TypeMeta.of(Empty), Default.init(Empty).?)
+        else
+            try init(allocator, Empty{});
+        defer parcel.deinit(allocator);
+        try expect(parcel.ptr != null);
+        try expectEqual(0, parcel.bytes().len);
+        parcel.deinit(allocator);
+        parcel.deinit(allocator);
+        try expectEqual(1, Empty.calls);
+        try expect(parcel.ptr == null);
+    }
 }

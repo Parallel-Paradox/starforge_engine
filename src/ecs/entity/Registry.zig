@@ -17,6 +17,7 @@ const reflect = engine.reflect;
 const TypeId = reflect.TypeId;
 const Parcel = reflect.Parcel;
 const Bundle = reflect.Bundle;
+const Default = reflect.Default;
 
 comp_reg: ComponentRegistry,
 arch_reg: ArchetypeRegistry,
@@ -60,21 +61,67 @@ pub fn get(self: *@This(), id: EntityId) ?*Entity {
     return entity;
 }
 
-pub const Error = Allocator.Error || ecs.entity.archetype.ChunkLayout.Error || error{
-    UnknownComponentType,
+pub const AddBundleError = AddParcelsError || Default.Error || error{
+    /// A required component id is unknown, stale, or has only been reserved.
+    UnknownRequirement,
+    /// A missing required component has no default constructor.
+    MissingRequirementDefault,
 };
 
-/// Creates an entity holding every value in `bundle`.
-///
-/// Every parcel's type must already be registered as a component in `comp_reg`;
-/// otherwise `UnknownComponentType` is returned. Archetype components are moved into the
-/// matching archetype, and sparse components are moved into their registered sparse sets.
-///
-/// Ownership of the bundle's values is consumed only on success: on failure the caller still
-/// owns the bundle and must free it.
-pub fn addBundle(self: *@This(), bundle: Bundle) Error!EntityId {
+/// Creates an entity from registered components, default-constructing missing requirements.
+/// Explicit values take precedence. Consumes `bundle` only on success.
+pub fn addBundle(self: *@This(), bundle: Bundle) AddBundleError!EntityId {
     const allocator = self.allocator;
-    const parcels = bundle.map.values();
+    var required: std.array_hash_map.Auto(CompId, void) = .{};
+    defer required.deinit(allocator);
+
+    for (bundle.map.values()) |parcel| {
+        const id = self.comp_reg.getById(parcel.meta.id) orelse return error.UnknownComponentType;
+        if (self.comp_reg.getMeta(id) == null) return error.UnknownComponentType;
+        try required.put(allocator, id, {});
+    }
+
+    // The ordered set doubles as a work queue. Mark on discovery to terminate cycles.
+    var index: usize = 0;
+    while (index < required.count()) : (index += 1) {
+        const meta = self.comp_reg.getMeta(required.keys()[index]) orelse
+            return error.UnknownRequirement;
+        for (meta.require) |id| try required.put(allocator, id, {});
+    }
+    for (required.keys()) |id| {
+        const meta = self.comp_reg.getMeta(id).?;
+        if (!bundle.map.contains(meta.typeId()) and meta.default == null)
+            return error.MissingRequirementDefault;
+    }
+
+    var parcels: std.ArrayList(Parcel) = .empty;
+    defer parcels.deinit(allocator);
+    try parcels.ensureTotalCapacity(allocator, required.count());
+    parcels.appendSliceAssumeCapacity(bundle.map.values());
+    const explicit_count = parcels.items.len;
+    errdefer for (parcels.items[explicit_count..]) |*parcel| parcel.deinit(allocator);
+
+    for (required.keys()) |id| {
+        const meta = self.comp_reg.getMeta(id).?;
+        if (bundle.map.contains(meta.typeId())) continue;
+        const parcel = try Parcel.initDefault(allocator, meta.type_meta, meta.default.?);
+        parcels.appendAssumeCapacity(parcel);
+    }
+
+    const id = try self.addParcels(parcels.items);
+    for (parcels.items[explicit_count..]) |*parcel| parcel.releaseStorage(allocator);
+    var moved = bundle;
+    moved.releaseStorage();
+    return id;
+}
+
+const AddParcelsError =
+    Allocator.Error || ecs.entity.archetype.ChunkLayout.Error || SplitByStorageError;
+
+/// Moves unique, fully resolved component values into storage only on success.
+/// Borrows descriptors and buffers; the caller handles their cleanup.
+fn addParcels(self: *@This(), parcels: []const Parcel) AddParcelsError!EntityId {
+    const allocator = self.allocator;
 
     const storage_split_ids = try allocator.alloc(CompId, parcels.len);
     defer allocator.free(storage_split_ids);
@@ -101,10 +148,10 @@ pub fn addBundle(self: *@This(), bundle: Bundle) Error!EntityId {
     self.storeArchetypeComponents(parcels, archetype, entity.archetype_row);
     self.storeSparseComponents(parcels, entity.sparse_comps.items, entity.id);
 
-    var moved = bundle;
-    moved.releaseStorage();
     return entity.id;
 }
+
+const SplitByStorageError = error{UnknownComponentType};
 
 /// Partitions `ids` in place into an archetype prefix and a sparse suffix. Returns the
 /// boundary index between them. Sparse ids are filled from the end, so that suffix is in
@@ -113,14 +160,14 @@ fn splitByStorage(
     self: *const @This(),
     parcels: []const Parcel,
     ids: []CompId,
-) Error!usize {
+) SplitByStorageError!usize {
     std.debug.assert(ids.len == parcels.len);
 
     var archetype_end: usize = 0;
     var sparse_start: usize = ids.len;
     for (parcels) |parcel| {
         const meta = self.comp_reg.getMetaByType(parcel.meta.id) orelse
-            return Error.UnknownComponentType;
+            return error.UnknownComponentType;
         const comp_id = self.comp_reg.getById(parcel.meta.id).?;
         switch (meta.storage) {
             .archetype => {
@@ -145,7 +192,7 @@ fn createEntity(
     sparse_components: []const CompId,
     archetype_id: ArchetypeId,
     archetype_row: usize,
-) Error!Entity {
+) Allocator.Error!Entity {
     const allocator = self.allocator;
     const id = if (self.retired.items.len != 0)
         self.retired.getLast()
@@ -168,13 +215,13 @@ fn createEntity(
     return entity;
 }
 
-/// Reserves room in the archetype and sparse sets before values leave the bundle.
+/// Reserves room in the archetype and sparse sets before values leave the parcels.
 fn reserveStorage(
     self: *@This(),
     archetype: *Archetype,
     id: EntityId,
     sparse_ids: []const SparseSetId,
-) Error!void {
+) Allocator.Error!void {
     try archetype.reserve(1);
 
     const allocator = self.allocator;
@@ -209,7 +256,7 @@ fn commitEntity(self: *@This(), entity: Entity, archetype: *Archetype) void {
     archetype.chunks.items[chunk_index].len += 1;
 }
 
-/// Copies the bundle's archetype components into `row`. Cannot fail.
+/// Copies the parcels' archetype components into `row`. Cannot fail.
 fn storeArchetypeComponents(
     self: *const @This(),
     parcels: []const Parcel,
@@ -227,7 +274,7 @@ fn storeArchetypeComponents(
     }
 }
 
-/// Copies the bundle's sparse components into their dense slots. Cannot fail.
+/// Copies the parcels' sparse components into their dense slots. Cannot fail.
 ///
 /// `splitByStorage` writes sparse ids into the suffix from the end, so `sparse_ids` is in
 /// reverse parcel order. `createEntity` resolves the sets in that same order, so walking the
@@ -265,6 +312,7 @@ fn storeSparseComponents(
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectError = std.testing.expectError;
+const checkAllAllocationFailures = std.testing.checkAllAllocationFailures;
 
 const TestMark = ecs.component.Mark;
 
@@ -282,15 +330,6 @@ const Velocity = struct {
 
 const Health = struct {
     pub const se_component: TestMark = .{ .storage = .sparse_set };
-    value: u32,
-};
-
-const Mana = struct {
-    pub const se_component: TestMark = .{ .storage = .sparse_set };
-    value: u32,
-};
-
-const Plain = struct {
     value: u32,
 };
 
@@ -315,72 +354,35 @@ fn expectArchetypeValue(
 
 test "addBundle stores components and reuses archetype and sparse storage" {
     const allocator = std.testing.allocator;
-
     var registry = init(allocator);
     defer registry.deinit();
+    inline for (.{ Position, Velocity, Health }) |T| _ = try registry.comp_reg.register(T);
 
-    _ = try registry.comp_reg.register(Position);
-    _ = try registry.comp_reg.register(Velocity);
-    _ = try registry.comp_reg.register(Health);
-
-    const position_id = registry.comp_reg.getByType(Position).?;
-    const velocity_id = registry.comp_reg.getByType(Velocity).?;
-    const health_id = registry.comp_reg.getByType(Health).?;
-
-    const first = try registry.addBundle(try .init(allocator, .{
-        Position{ .x = 3, .y = 4 },
-        Velocity{ .dx = 1, .dy = 2 },
-        Health{ .value = 11 },
-    }));
-    const second = try registry.addBundle(try .init(allocator, .{
-        Position{ .x = 5, .y = 6 },
-        Velocity{ .dx = 3, .dy = 4 },
-        Health{ .value = 22 },
-    }));
-
-    try expectEqual(0, first.index.get());
-    try expectEqual(1, second.index.get());
-    try expectEqual(2, registry.entities.items.len);
+    for (0..2) |i| {
+        const value: i32 = @intCast(i + 1);
+        const id = try registry.addBundle(try .init(allocator, .{
+            Position{ .x = value, .y = 4 },
+            Velocity{ .dx = value, .dy = 2 },
+            Health{ .value = @intCast(value) },
+        }));
+        const entity = registry.get(id).?;
+        try expectEqual(i, id.index.get());
+        try expectEqual(i, entity.archetype_row);
+        inline for (.{ Position, Velocity, Health }) |T|
+            try expect(entity.signature.has(registry.comp_reg.getByType(T).?));
+        const archetype = registry.arch_reg.getById(entity.archetype_id).?;
+        try expectArchetypeValue(archetype, Position, i, .{ .x = value, .y = 4 });
+        try expectArchetypeValue(archetype, Velocity, i, .{ .dx = value, .dy = 2 });
+        try expectEqual(
+            @as(u32, @intCast(value)),
+            registry.sparse_reg.getByType(TypeId.of(Health)).?.set.get(Health, id).?.value,
+        );
+    }
     try expectEqual(1, registry.arch_reg.entries.items.len);
     try expectEqual(1, registry.sparse_reg.entries.items.len);
-
-    const first_entity = registry.get(first).?;
-    const second_entity = registry.get(second).?;
-    try expect(first_entity.id.eql(first));
-    try expect(first_entity.signature.has(position_id));
-    try expect(first_entity.signature.has(velocity_id));
-    try expect(first_entity.signature.has(health_id));
-    try expect(first_entity.archetype_id.eql(second_entity.archetype_id));
-    try expectEqual(0, first_entity.archetype_row);
-    try expectEqual(1, second_entity.archetype_row);
-
-    try expectEqual(1, first_entity.sparse_comps.items.len);
-    try expectEqual(1, second_entity.sparse_comps.items.len);
-    try expect(first_entity.sparse_comps.items[0].eql(second_entity.sparse_comps.items[0]));
-
-    const archetype = registry.arch_reg.getById(first_entity.archetype_id).?;
-    try expectEqual(2, archetype.len());
-    try expect(archetype.meta.signature.has(position_id));
-    try expect(archetype.meta.signature.has(velocity_id));
-    try expect(!archetype.meta.signature.has(health_id));
-
-    try expectArchetypeValue(archetype, Position, 0, .{ .x = 3, .y = 4 });
-    try expectArchetypeValue(archetype, Position, 1, .{ .x = 5, .y = 6 });
-    try expectArchetypeValue(archetype, Velocity, 0, .{ .dx = 1, .dy = 2 });
-    try expectArchetypeValue(archetype, Velocity, 1, .{ .dx = 3, .dy = 4 });
-
-    const sparse_id = first_entity.sparse_comps.items[0];
-    const sparse_set = registry.sparse_reg.getById(sparse_id).?;
-    try expectEqual(2, sparse_set.len());
-    try expectEqual(0, sparse_set.sparse_to_dense.items[first.index.get()].get());
-    try expectEqual(1, sparse_set.sparse_to_dense.items[second.index.get()].get());
-
-    const healths: [*]Health = @ptrCast(@alignCast(sparse_set.ptr));
-    try expectEqual(11, healths[0].value);
-    try expectEqual(22, healths[1].value);
 }
 
-test "addBundle accepts an empty bundle" {
+test "addBundle accepts an empty bundle and get rejects unknown ids" {
     const allocator = std.testing.allocator;
     var registry = init(allocator);
     defer registry.deinit();
@@ -396,70 +398,9 @@ test "addBundle accepts an empty bundle" {
     const archetype = registry.arch_reg.getById(entity.archetype_id).?;
     try expectEqual(0, archetype.meta.columns.items.len);
     try expectEqual(1, archetype.len());
-}
-
-test "addBundle rejects types that are not registered components" {
-    const allocator = std.testing.allocator;
-    var registry = init(allocator);
-    defer registry.deinit();
-    _ = try registry.comp_reg.register(Position);
-
-    var bundle: Bundle = try .init(allocator, .{
-        Position{ .x = 3, .y = 4 },
-        Plain{ .value = 7 },
-    });
-    try expectError(Error.UnknownComponentType, registry.addBundle(bundle));
-    bundle.deinit();
-
-    // Validation happens before any entity or storage is created.
-    try expectEqual(0, registry.entities.items.len);
-    try expectEqual(0, registry.arch_reg.entries.items.len);
-    try expectEqual(0, registry.sparse_reg.entries.items.len);
-}
-
-test "addBundle takes ownership of managed values" {
-    const allocator = std.testing.allocator;
-    var calls: usize = 0;
-
-    {
-        var registry = init(allocator);
-        defer registry.deinit();
-        _ = try registry.comp_reg.register(Probe);
-
-        _ = try registry.addBundle(try .init(allocator, .{
-            Probe{ .calls = &calls },
-        }));
-
-        // The bundle only released its parcel storage; the registry now owns the value.
-        try expectEqual(0, calls);
-    }
-    try expectEqual(1, calls);
-}
-
-test "addBundle matches each sparse component to its own set" {
-    const allocator = std.testing.allocator;
-    var registry = init(allocator);
-    defer registry.deinit();
-    _ = try registry.comp_reg.register(Health);
-    _ = try registry.comp_reg.register(Mana);
-
-    const id = try registry.addBundle(try .init(allocator, .{
-        Health{ .value = 11 },
-        Mana{ .value = 22 },
-    }));
-
-    const entity = registry.get(id).?;
-    try expectEqual(2, entity.sparse_comps.items.len);
-
-    const health_entry = registry.sparse_reg.getByType(TypeId.of(Health)).?;
-    const mana_entry = registry.sparse_reg.getByType(TypeId.of(Mana)).?;
-    const health_set = &health_entry.set;
-    const mana_set = &mana_entry.set;
-
-    const health: *Health = @ptrCast(@alignCast(health_set.ptr));
-    const mana: *Mana = @ptrCast(@alignCast(mana_set.ptr));
-    try expectEqual(11, health.value);
-    try expectEqual(22, mana.value);
+    try expect(registry.get(EntityId.init(id.index.get(), id.generation.next().get())) == null);
+    try expect(registry.get(EntityId.init(1, 0)) == null);
+    try expect(registry.get(EntityId.invalid) == null);
 }
 
 test "addBundle reuses a retired entity slot" {
@@ -499,22 +440,227 @@ test "addBundle reuses a retired entity slot" {
     try expectArchetypeValue(archetype, Position, 1, .{ .x = 3, .y = 4 });
 }
 
-test "get returns a live entity and rejects unknown ids" {
+const RequirementGraph = struct {
+    const Root = struct {
+        pub const se_component: TestMark = .{ .require = &.{ Left, Right } };
+        value: u32,
+    };
+    const Left = struct {
+        pub const se_component: TestMark = .{ .require = &.{Shared} };
+        value: u32 align(64) = 11,
+    };
+    const Right = struct {
+        pub const se_component: TestMark = .{ .storage = .sparse_set, .require = &.{Shared} };
+        value: u32,
+        var calls: usize = 0;
+
+        pub fn default() @This() {
+            calls += 1;
+            return .{ .value = 22 };
+        }
+    };
+    const Shared = struct {
+        pub const se_component: TestMark = .{ .require = &.{Root} };
+        var created: usize = 0;
+        var destroyed: usize = 0;
+
+        pub fn default() @This() {
+            created += 1;
+            return .{};
+        }
+
+        pub fn deinit(self: *@This()) void {
+            _ = self;
+            destroyed += 1;
+        }
+    };
+};
+
+test "addBundle completes shared cyclic requirements and preserves explicit values" {
+    const G = RequirementGraph;
+    G.Right.calls = 0;
+    G.Shared.created = 0;
+    G.Shared.destroyed = 0;
+    {
+        const allocator = std.testing.allocator;
+        var registry = init(allocator);
+        defer registry.deinit();
+        _ = try registry.comp_reg.register(G.Root);
+        _ = try registry.comp_reg.register(Health);
+        _ = try registry.addBundle(try Bundle.init(allocator, .{Health{ .value = 100 }}));
+
+        const first = try registry.addBundle(try Bundle.init(allocator, .{
+            G.Root{ .value = 1 },
+            Health{ .value = 55 },
+        }));
+        const second = try registry.addBundle(try Bundle.init(allocator, .{
+            G.Root{ .value = 2 },
+            G.Left{ .value = 33 },
+            G.Right{ .value = 44 },
+            Health{ .value = 66 },
+        }));
+        const a = registry.get(first).?;
+        const b = registry.get(second).?;
+        inline for (.{ G.Root, G.Left, G.Right, G.Shared, Health }) |T| {
+            const id = registry.comp_reg.getByType(T).?;
+            try expect(a.signature.has(id));
+            try expect(b.signature.has(id));
+        }
+        const archetype = registry.arch_reg.getById(a.archetype_id).?;
+        try expectArchetypeValue(archetype, G.Root, a.archetype_row, .{ .value = 1 });
+        try expectArchetypeValue(archetype, G.Left, a.archetype_row, .{});
+        try expectArchetypeValue(archetype, G.Left, b.archetype_row, .{ .value = 33 });
+        const right = &registry.sparse_reg.getByType(TypeId.of(G.Right)).?.set;
+        const health = &registry.sparse_reg.getByType(TypeId.of(Health)).?.set;
+        try expectEqual(22, right.get(G.Right, first).?.value);
+        try expectEqual(44, right.get(G.Right, second).?.value);
+        try expectEqual(55, health.get(Health, first).?.value);
+        try expectEqual(66, health.get(Health, second).?.value);
+        try expectEqual(1, G.Right.calls);
+        try expectEqual(2, G.Shared.created);
+        try expectEqual(0, G.Shared.destroyed);
+    }
+    try expectEqual(2, G.Shared.destroyed);
+}
+
+const AutoRequirement = struct {
+    pub const se_component: TestMark = .{ .storage = .sparse_set };
+    value: u32 = 7,
+    var created: usize = 0;
+    var destroyed: usize = 0;
+
+    pub fn default() @This() {
+        created += 1;
+        return .{};
+    }
+
+    pub fn deinit(self: *@This()) void {
+        _ = self;
+        destroyed += 1;
+    }
+};
+
+test "addBundle validates runtime requirements and cleans up failed construction" {
+    const Root = struct {};
+    const Broken = struct {
+        value: u8,
+
+        fn wrongSize() u64 {
+            return 42;
+        }
+    };
     const allocator = std.testing.allocator;
     var registry = init(allocator);
     defer registry.deinit();
+    AutoRequirement.created = 0;
+    AutoRequirement.destroyed = 0;
+    var bundle = try Bundle.init(allocator, .{Root{}});
+    defer bundle.deinit();
+    try expectError(error.UnknownComponentType, registry.addBundle(bundle));
+    _ = try registry.comp_reg.reserve(TypeId.of(Root));
+    try expectError(error.UnknownComponentType, registry.addBundle(bundle));
+
+    const generated = try registry.comp_reg.register(AutoRequirement);
+    const position = try registry.comp_reg.reserve(TypeId.of(Position));
+    const broken = try registry.comp_reg.registerMeta(.{
+        .type_meta = reflect.TypeMeta.of(Broken),
+        .default = Default.initWithImpl(u64, Broken.wrongSize),
+    });
+    _ = try registry.comp_reg.registerMeta(.{
+        .type_meta = reflect.TypeMeta.of(Root),
+        .require = @constCast(&[_]CompId{ generated, position, broken }),
+    });
+    try expectError(error.UnknownRequirement, registry.addBundle(bundle));
     _ = try registry.comp_reg.register(Position);
+    try expectError(error.MissingRequirementDefault, registry.addBundle(bundle));
+    try expectEqual(0, AutoRequirement.created);
 
-    const first = try registry.addBundle(try .init(allocator, .{
-        Position{ .x = 1, .y = 2 },
-    }));
-    const second = try registry.addBundle(try .init(allocator, .{
-        Position{ .x = 3, .y = 4 },
-    }));
+    try bundle.insert(Position{ .x = 3, .y = 4 });
+    const ptr = bundle.map.values()[0].ptr;
+    try expectError(error.BufferSizeMismatch, registry.addBundle(bundle));
+    try expectEqual(1, AutoRequirement.created);
+    try expectEqual(1, AutoRequirement.destroyed);
+    try expectEqual(2, bundle.map.count());
+    try expectEqual(ptr, bundle.map.values()[0].ptr);
+    try expectEqual(0, registry.entities.items.len);
 
-    try expect(registry.get(first).?.id.eql(first));
-    try expect(registry.get(second).?.id.eql(second));
-    try expect(registry.get(EntityId.init(0, first.generation.next().get())) == null);
-    try expect(registry.get(EntityId.init(2, 0)) == null);
-    try expect(registry.get(EntityId.invalid) == null);
+    try bundle.insert(Broken{ .value = 7 });
+    const id = try registry.addBundle(bundle);
+    bundle = .{ .allocator = allocator };
+    try expect(registry.get(id).?.signature.has(generated));
+    try expectEqual(2, AutoRequirement.created);
+}
+
+test "addBundle destroys generated values but preserves input on layout failure" {
+    const Huge = struct {
+        pub const se_component: TestMark = .{ .require = &.{AutoRequirement} };
+        calls: *usize,
+        payload: [16 * 1024 + 1]u8 = undefined,
+
+        pub fn deinit(self: *@This()) void {
+            self.calls.* += 1;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var registry = init(allocator);
+    defer registry.deinit();
+    _ = try registry.comp_reg.register(Huge);
+    AutoRequirement.created = 0;
+    AutoRequirement.destroyed = 0;
+    var calls: usize = 0;
+    var bundle = try Bundle.init(allocator, .{Huge{ .calls = &calls }});
+    const ptr = bundle.map.values()[0].ptr;
+
+    try expectError(error.BufferTooLarge, registry.addBundle(bundle));
+    try expectEqual(0, calls);
+    try expectEqual(1, AutoRequirement.created);
+    try expectEqual(1, AutoRequirement.destroyed);
+    try expectEqual(0, registry.entities.items.len);
+    try expectEqual(ptr, bundle.map.values()[0].ptr);
+    bundle.deinit();
+    try expectEqual(1, calls);
+}
+
+fn testRequirementAllocationFailures(allocator: Allocator) !void {
+    const Root = struct {
+        pub const se_component: TestMark = .{ .require = &.{AutoRequirement} };
+        value: u32 = 9,
+    };
+    AutoRequirement.created = 0;
+    AutoRequirement.destroyed = 0;
+    var calls: usize = 0;
+    {
+        var registry = init(allocator);
+        defer registry.deinit();
+        _ = try registry.comp_reg.register(Root);
+        _ = try registry.comp_reg.register(Probe);
+        // Keep the input independent of the failing world allocator.
+        var bundle = try Bundle.init(std.testing.allocator, .{ Root{}, Probe{ .calls = &calls } });
+        var consumed = false;
+        defer if (!consumed) bundle.deinit();
+        const ptr = bundle.map.values()[1].ptr;
+        const id = registry.addBundle(bundle) catch |err| {
+            try expectEqual(0, calls);
+            try expectEqual(2, bundle.map.count());
+            try expectEqual(ptr, bundle.map.values()[1].ptr);
+            try expectEqual(AutoRequirement.created, AutoRequirement.destroyed);
+            try expectEqual(0, registry.entities.items.len);
+            for (registry.arch_reg.entries.items) |*entry|
+                try expectEqual(0, entry.archetype.len());
+            for (registry.sparse_reg.entries.items) |*entry| try expectEqual(0, entry.set.len());
+            return err;
+        };
+        consumed = true;
+        try expect(registry.get(id).?.signature
+            .has(registry.comp_reg.getByType(AutoRequirement).?));
+        try expectEqual(0, calls);
+        try expectEqual(1, AutoRequirement.created);
+        try expectEqual(0, AutoRequirement.destroyed);
+    }
+    try expectEqual(1, calls);
+    try expectEqual(AutoRequirement.created, AutoRequirement.destroyed);
+}
+
+test "addBundle preserves input and cleans generated values on every allocation failure" {
+    try checkAllAllocationFailures(std.testing.allocator, testRequirementAllocationFailures, .{});
 }
