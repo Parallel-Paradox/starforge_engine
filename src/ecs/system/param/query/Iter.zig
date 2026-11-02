@@ -75,8 +75,9 @@ pub fn column(self: @This(), item: Item, index: usize) []u8 {
 ///
 /// Asserts that `index` is a target field of the query.
 pub fn sparseSet(self: @This(), index: usize) ?*SparseSet {
-    std.debug.assert(index < self.state.targets.len);
+    const targets = self.state.targets orelse unreachable;
+    std.debug.assert(index < targets.len);
 
-    const target = self.state.targets[index] orelse return null;
+    const target = targets[index] orelse return null;
     return self.state.world.sparseReg().getById(target.sparse_id);
 }

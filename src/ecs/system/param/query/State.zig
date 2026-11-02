@@ -43,19 +43,20 @@ pub const Cache = struct {
 /// The world the query iterates.
 world: *World,
 /// One entry per query target field; null for `EntityId` fields.
-targets: []?Target,
+targets: ?[]?Target = null,
 /// Compiled filter tree.
-filter: Filter,
+filter: Filter = .empty,
 /// Archetypes matching the query.
 caches: std.ArrayList(Cache) = .empty,
 /// Next archetype change-log version to apply.
 version: usize = 0,
 
-/// Builds runtime state, taking ownership of `targets` and `filter`.
-/// Both must be allocated with `world.allocator`; `deinit` releases them.
-/// Call `update` before iterating to fill the archetype cache.
-pub fn init(world: *World, targets: []?Target, filter: Filter) @This() {
-    return .{ .world = world, .targets = targets, .filter = filter };
+/// Builds runtime state for `world`.
+///
+/// The query installs the target layout and filter on its first extraction,
+/// which also fills the archetype cache.
+pub fn init(world: *World) @This() {
+    return .{ .world = world };
 }
 
 /// Returns an iterator over the cached archetypes, starting at the first one
@@ -83,8 +84,13 @@ pub fn clear(self: *@This()) void {
 
 /// Releases the filter, the target layout and cached archetypes.
 pub fn deinit(self: *@This()) void {
-    self.filter.deinit(self.world.allocator);
-    self.world.allocator.free(self.targets);
+    if (self.targets) |targets| {
+        self.filter.deinit(self.world.allocator);
+        self.world.allocator.free(targets);
+        self.targets = null;
+        self.filter = .empty;
+    }
+
     self.clear();
     self.caches.deinit(self.world.allocator);
 }
@@ -92,23 +98,17 @@ pub fn deinit(self: *@This()) void {
 /// Refreshes the sparse set ids and the cached archetypes, applying change-log
 /// entries incrementally and rebuilding when the version is outside the
 /// retained log window.
+///
+/// Asserts that the target layout was installed (see `Query.extract`).
 pub fn update(self: *@This()) Allocator.Error!void {
-    for (self.targets) |*maybe| {
-        if (maybe.*) |*target| {
-            if (target.storage != .sparse_set) continue;
-            target.sparse_id = if (self.world.sparseReg().getByType(target.type_id)) |entry|
-                entry.id
-            else
-                .invalid;
-        }
-    }
-
     const registry = self.world.archReg();
     const log = &registry.change_log;
 
     if (self.version < log.oldest_ver or self.version > log.next_ver) {
         return self.rebuild();
     }
+
+    self.resolveSparse();
 
     var ver = self.version;
     while (ver < log.next_ver) : (ver += 1) {
@@ -118,8 +118,26 @@ pub fn update(self: *@This()) Allocator.Error!void {
     }
 }
 
+/// Resolves the sparse set id of every sparse-set target field.
+fn resolveSparse(self: *@This()) void {
+    for (self.targets.?) |*maybe| {
+        if (maybe.*) |*target| {
+            if (target.storage != .sparse_set) continue;
+            target.sparse_id = if (self.world.sparseReg().getByType(target.type_id)) |entry|
+                entry.id
+            else
+                .invalid;
+        }
+    }
+}
+
 /// Rebuilds the cached archetype list from the registry.
-fn rebuild(self: *@This()) Allocator.Error!void {
+///
+/// Used on first preparation and whenever the change log no longer covers the
+/// version being resumed from.
+pub fn rebuild(self: *@This()) Allocator.Error!void {
+    self.resolveSparse();
+
     const registry = self.world.archReg();
 
     self.clear();
@@ -165,10 +183,11 @@ fn insert(
     const decision = self.classify(archetype.meta.signature) orelse return false;
 
     const allocator = self.world.allocator;
-    const columns = try allocator.alloc(usize, self.targets.len);
+    const targets = self.targets.?;
+    const columns = try allocator.alloc(usize, targets.len);
     errdefer allocator.free(columns);
     for (columns) |*column| column.* = 0;
-    for (self.targets, 0..) |maybe, i| {
+    for (targets, 0..) |maybe, i| {
         const target = maybe orelse continue;
         if (target.storage != .archetype) continue;
         columns[i] = archetype.meta.id_to_col.get(target.type_id).?;
@@ -185,7 +204,7 @@ fn insert(
 /// Returns the filter decision for the archetype with signature `sig`, or null when
 /// the signature does not satisfy the query targets or filters.
 fn classify(self: *const @This(), sig: Signature) ?Filter.Decision {
-    for (self.targets) |maybe| {
+    for (self.targets.?) |maybe| {
         const target = maybe orelse continue;
         if (target.storage == .archetype and !sig.has(target.id)) return null;
     }
