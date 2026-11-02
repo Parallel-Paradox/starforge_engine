@@ -67,6 +67,20 @@ pub fn next(self: *@This()) ?Item {
     return item;
 }
 
+/// Returns the item at the current position, without advancing.
+///
+/// Asserts that the current row is live.
+pub fn get(self: @This()) Item {
+    std.debug.assert(self.row < self.archetype.len());
+
+    return .{
+        .id = self.archetype.ids.items[self.row],
+        .chunk_index = self.chunk_index,
+        .row_in_chunk = self.row_in_chunk,
+        .archetype = self.archetype,
+    };
+}
+
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 

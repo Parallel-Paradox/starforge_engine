@@ -14,10 +14,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const engine = @import("engine");
-const CompReg = engine.ecs.component.Registry;
-const CompId = engine.ecs.component.Id;
-const Storage = engine.ecs.component.Storage;
-const Signature = engine.ecs.entity.Signature;
+const ecs = engine.ecs;
+const CompReg = ecs.component.Registry;
+const CompId = ecs.component.Id;
+const Storage = ecs.component.Storage;
+const Signature = ecs.entity.Signature;
 
 /// A filter that owns no nodes and therefore accepts everything.
 pub const empty: @This() = .{};
