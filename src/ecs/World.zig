@@ -98,13 +98,6 @@ pub fn addEntity(
 
     var bundle = try Bundle.init(self.allocator, fields);
     errdefer bundle.releaseStorage();
-    return self.addBundle(bundle);
-}
-
-/// Creates an entity from a bundle, delegating requirement completion to the entity registry.
-/// Input component types must already be registered. Explicit values override defaults.
-/// On failure the caller retains the unchanged bundle and its values.
-pub fn addBundle(self: *@This(), bundle: Bundle) EntityRegistry.AddBundleError!EntityId {
     return self.entity_reg.addBundle(bundle);
 }
 
@@ -162,7 +155,7 @@ test "addEntity registers components and creates an entity" {
     // _ = world.addEntity(.{ @as(u32, 1) });
 }
 
-test "addEntity and addBundle delegate requirement completion to the entity registry" {
+test "addEntity delegates requirement completion to the entity registry" {
     const Required = struct {
         pub const se_component: TestMark = .{ .storage = .sparse_set };
         value: u32 = 7,
@@ -174,11 +167,9 @@ test "addEntity and addBundle delegate requirement completion to the entity regi
     var world = init(allocator);
     defer world.deinit();
 
-    const first = try world.addEntity(.{Root{}});
-    const second = try world.addBundle(try Bundle.init(allocator, .{Root{}}));
+    const id = try world.addEntity(.{Root{}});
     const required = world.compReg().getByType(Required).?;
-    try expect(world.entityReg().get(first).?.signature.has(required));
-    try expect(world.entityReg().get(second).?.signature.has(required));
+    try expect(world.entityReg().get(id).?.signature.has(required));
 }
 
 test "addEntity releases the temporary bundle without disposing copied values" {
