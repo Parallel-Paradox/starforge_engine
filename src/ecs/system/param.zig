@@ -49,6 +49,26 @@ fn assertContext(comptime C: type) void {
     }
 }
 
+/// Asserts that `P` is a valid system parameter.
+///
+/// `*World` is accepted directly. Every other parameter must provide
+/// `extract`, and a parameter declaring `Context` must also satisfy
+/// `assertContext`.
+pub fn assertParam(comptime P: type) void {
+    if (P == *World) return;
+
+    const has_extract = switch (@typeInfo(P)) {
+        .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(P, "extract"),
+        else => false,
+    };
+    if (!has_extract) {
+        @compileError(@typeName(P) ++ " is not a system parameter; " ++
+            "expected *World or a type declaring `extract`");
+    }
+
+    if (@hasDecl(P, "Context")) assertContext(P.Context);
+}
+
 /// Extracts a parameter of type `P` from its context `ctx`.
 pub fn extractParam(comptime P: type, ctx: *Context(P)) !P {
     if (P == *World) return ctx;
@@ -77,4 +97,20 @@ test "Context returns a declared context built by init" {
     };
 
     try std.testing.expect(Context(Good) == Good.Context);
+}
+
+test "assertParam accepts system parameters" {
+    const Q = query.Query(struct { engine.ecs.entity.Id });
+    const Extract = struct {
+        pub fn extract(_: *World) error{}!@This() {
+            return .{};
+        }
+    };
+
+    assertParam(*World);
+    assertParam(Q);
+    assertParam(Extract);
+
+    // A scalar is not a system parameter:
+    // assertParam(u32);
 }
