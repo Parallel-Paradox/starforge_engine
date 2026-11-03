@@ -217,6 +217,7 @@ fn indexOf(self: *const @This(), id: ResId) ?usize {
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+const checkAllAllocationFailures = std.testing.checkAllAllocationFailures;
 
 const Probe = struct {
     pub const se_resource: resource.Mark = .{};
@@ -398,5 +399,5 @@ fn testAllocationFailures(allocator: Allocator) !void {
 }
 
 test "allocation failures preserve slots, IDs and value ownership" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, testAllocationFailures, .{});
+    try checkAllAllocationFailures(std.testing.allocator, testAllocationFailures, .{});
 }
