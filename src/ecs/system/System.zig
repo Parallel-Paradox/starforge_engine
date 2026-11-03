@@ -7,6 +7,7 @@ const engine = @import("engine");
 const World = engine.ecs.World;
 const TypeMeta = engine.reflect.TypeMeta;
 const param = @import("param.zig");
+const mod = @import("mod.zig");
 
 ptr: *anyopaque,
 vtable: *const VTable,
@@ -25,6 +26,7 @@ pub fn deinit(self: *@This(), world: *World) void {
 }
 
 pub fn Builder(comptime func: anytype) type {
+    mod.assertSystem(func);
     const fn_info = @typeInfo(@TypeOf(func)).@"fn";
 
     return struct {
@@ -34,10 +36,7 @@ pub fn Builder(comptime func: anytype) type {
         pub const ContextList = Blk: {
             var types: [fn_info.param_types.len]type = undefined;
             for (fn_info.param_types, 0..) |maybe_param, i| {
-                const P = maybe_param orelse @compileError(
-                    "system function parameters must have concrete types",
-                );
-                param.assertParam(P);
+                const P = maybe_param.?; // assertSystem rejects generic parameters.
                 const C = param.Context(P);
                 types[i] = if (C == World) void else C;
             }
@@ -157,8 +156,10 @@ fn sampleRun(_: *World, _: WorldParam, p: ProbeParam) void {
 test "ContextList keeps one slot per parameter, void for World contexts" {
     try expect(Builder(sampleRun).ContextList == @Tuple(&.{ void, void, ProbeCtx }));
 
-    // A scalar argument is rejected by assertParam:
-    // _ = Builder(struct { fn run(_: u32) void {} }.run);
+    // A scalar argument is rejected by assertSystem:
+    // _ = Builder(struct {
+    //     fn run(_: u32) void {}
+    // }.run);
 }
 
 test "build, run and deinit manage the system and its contexts" {
