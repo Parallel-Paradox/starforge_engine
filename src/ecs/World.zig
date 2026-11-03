@@ -10,20 +10,24 @@ const EntityId = entity.Id;
 const EntityRegistry = entity.Registry;
 const ArchetypeRegistry = entity.archetype.Registry;
 const SparseSetRegistry = entity.sparse_set.Registry;
+const ResourceRegistry = ecs.resource.Registry;
 const Bundle = engine.reflect.Bundle;
 
 entity_reg: EntityRegistry,
+res_reg: ResourceRegistry,
 allocator: Allocator,
 
 pub fn init(allocator: Allocator) @This() {
     return .{
         .entity_reg = EntityRegistry.init(allocator),
+        .res_reg = ResourceRegistry.init(allocator),
         .allocator = allocator,
     };
 }
 
 pub fn deinit(self: *@This()) void {
     self.entity_reg.deinit();
+    self.res_reg.deinit();
 }
 
 /// Returns the component registry backing this world.
@@ -44,6 +48,11 @@ pub fn archReg(self: *@This()) *ArchetypeRegistry {
 /// Returns the sparse set registry backing this world.
 pub fn sparseReg(self: *@This()) *SparseSetRegistry {
     return &self.entity_reg.sparse_reg;
+}
+
+/// Returns the resource registry backing this world.
+pub fn resReg(self: *@This()) *ResourceRegistry {
+    return &self.res_reg;
 }
 
 /// Creates an entity from a struct or tuple of component values.
@@ -77,6 +86,7 @@ pub fn addBundle(self: *@This(), bundle: Bundle) EntityRegistry.AddBundleError!E
 }
 
 const expect = std.testing.expect;
+const expectError = std.testing.expectError;
 
 const TestMark = component.Mark;
 
@@ -157,7 +167,7 @@ test "addEntity releases the temporary bundle without disposing copied values" {
     var huge: Huge = .{ .calls = &calls };
 
     // The archetype layout fails after `Bundle.init` has copied the fields.
-    try std.testing.expectError(error.BufferTooLarge, world.addEntity(.{huge}));
+    try expectError(error.BufferTooLarge, world.addEntity(.{huge}));
     try expect(calls == 0);
 
     // The caller still owns the value.
