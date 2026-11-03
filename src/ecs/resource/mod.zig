@@ -3,6 +3,9 @@
 //! struct field defaults. Destruction follows `reflect.TypeMeta`: only a public
 //! `fn deinit(self: *T) void` is called automatically; other types are treated as trivial.
 
+const engine = @import("engine");
+
+pub const Id = engine.ecs.Id;
 pub const Registry = @import("Registry.zig");
 
 /// Declare `pub const se_resource: Mark = .{};` in a type to mark it as a resource.

@@ -38,7 +38,7 @@ pub fn init(
     const require = try allocator.alloc(Id, T.se_component.require.len);
     errdefer allocator.free(require);
     inline for (T.se_component.require, 0..) |Req, i| {
-        require[i] = comp_reg.getByType(Req) orelse try comp_reg.register(Req);
+        require[i] = comp_reg.idOf(Req) orelse try comp_reg.register(Req);
     }
     return .{
         .type_meta = TypeMeta.of(T),
@@ -167,13 +167,13 @@ test "init resolves direct requirements, reuses ids and deinit resets metadata" 
         var meta = try init(Dependent, allocator, &registry);
         defer meta.deinit(allocator);
 
-        const middle = registry.getByType(Middle).?;
-        const velocity = registry.getByType(Velocity).?;
+        const middle = registry.idOf(Middle).?;
+        const velocity = registry.idOf(Velocity).?;
         try std.testing.expectEqualSlices(Id, &.{ position, middle }, meta.require);
-        try expectEqual(registered, registry.getMeta(position) != null);
-        try expect(registry.getMeta(middle).?.require[0].eql(velocity));
-        try expect(registry.getMeta(velocity) != null);
-        try expect(registry.getByType(Dependent) == null);
+        try expectEqual(registered, registry.getById(position) != null);
+        try expect(registry.getById(middle).?.require[0].eql(velocity));
+        try expect(registry.getById(velocity) != null);
+        try expect(registry.idOf(Dependent) == null);
         try expectEqual(3, registry.type_to_id.count());
         meta.deinit(allocator);
         try expectEqualDeep(@This(){}, meta);
@@ -251,11 +251,11 @@ test "init registers cyclic requirements" {
     var meta = try init(Cycle.A, allocator, &registry);
     defer meta.deinit(allocator);
 
-    const a = registry.getByType(Cycle.A).?;
-    const b = registry.getByType(Cycle.B).?;
+    const a = registry.idOf(Cycle.A).?;
+    const b = registry.idOf(Cycle.B).?;
     try expect(meta.require[0].eql(b));
-    try expect(meta.eql(registry.getMeta(a).?));
-    try expect(registry.getMeta(b).?.require[0].eql(a));
+    try expect(meta.eql(registry.getById(a).?.*));
+    try expect(registry.getById(b).?.require[0].eql(a));
     try expectEqual(2, registry.type_to_id.count());
 }
 
@@ -264,15 +264,15 @@ fn testInitAllocationFailures(allocator: Allocator) !void {
     defer registry.deinit();
     var meta = init(Dependent, allocator, &registry) catch |err| {
         inline for (.{ Position, Middle, Velocity }) |Req| {
-            if (registry.getByType(Req)) |id| try expect(registry.getMeta(id) != null);
+            if (registry.idOf(Req)) |id| try expect(registry.getById(id) != null);
         }
         return err;
     };
     defer meta.deinit(allocator);
 
-    try expect(meta.require[0].eql(registry.getByType(Position).?));
-    try expect(meta.require[1].eql(registry.getByType(Middle).?));
-    try expect(registry.getMetaByType(TypeId.of(Velocity)) != null);
+    try expect(meta.require[0].eql(registry.idOf(Position).?));
+    try expect(meta.require[1].eql(registry.idOf(Middle).?));
+    try expect(registry.get(Velocity) != null);
 }
 
 test "init cleans up when allocating or registering requirements fails" {

@@ -123,7 +123,7 @@ fn resolveSparse(self: *@This()) void {
     for (self.targets.?) |*maybe| {
         if (maybe.*) |*target| {
             if (target.storage != .sparse_set) continue;
-            target.sparse_id = if (self.world.sparseReg().getByType(target.type_id)) |entry|
+            target.sparse_id = if (self.world.sparseReg().getByTypeId(target.type_id)) |entry|
                 entry.id
             else
                 .invalid;

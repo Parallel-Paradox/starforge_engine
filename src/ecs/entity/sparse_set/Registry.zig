@@ -49,7 +49,7 @@ pub fn getById(self: *@This(), id: SparseSetId) ?*SparseSet {
 
 /// Returns the entry for the sparse set of `type_id`, or null if it is unknown.
 /// The pointer is invalidated when another sparse set is registered.
-pub fn getByType(self: *@This(), type_id: TypeId) ?*Entry {
+pub fn getByTypeId(self: *@This(), type_id: TypeId) ?*Entry {
     const id = self.type_to_id.get(type_id) orelse return null;
     const index = id.index.tryGet() orelse return null;
     if (index >= self.entries.items.len) return null;
@@ -63,7 +63,7 @@ pub fn getByType(self: *@This(), type_id: TypeId) ?*Entry {
 /// The pointer is invalidated when another sparse set is registered.
 pub fn getOrCreate(self: *@This(), meta: TypeMeta) Allocator.Error!*Entry {
     const type_id = meta.id;
-    if (self.getByType(type_id)) |entry| return entry;
+    if (self.getByTypeId(type_id)) |entry| return entry;
 
     const allocator = self.allocator;
     try self.entries.ensureUnusedCapacity(allocator, 1);
@@ -137,12 +137,12 @@ test "getById returns a registered set and rejects unknown ids" {
     try expect(registry.getById(SparseSetId.invalid) == null);
 }
 
-test "getByType finds an entry by its component type" {
+test "getByTypeId finds an entry by its component type" {
     const allocator = std.testing.allocator;
     var registry = init(allocator);
     defer registry.deinit();
 
     const entry = try registry.getOrCreate(TypeMeta.of(u32));
-    try expect(registry.getByType(TypeId.of(u32)).? == entry);
-    try expect(registry.getByType(TypeId.of(i32)) == null);
+    try expect(registry.getByTypeId(TypeId.of(u32)).? == entry);
+    try expect(registry.getByTypeId(TypeId.of(i32)) == null);
 }

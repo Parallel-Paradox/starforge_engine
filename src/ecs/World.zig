@@ -10,6 +10,7 @@ const EntityId = entity.Id;
 const EntityRegistry = entity.Registry;
 const ArchetypeRegistry = entity.archetype.Registry;
 const SparseSetRegistry = entity.sparse_set.Registry;
+const ResId = ecs.resource.Id;
 const ResourceRegistry = ecs.resource.Registry;
 const Bundle = engine.reflect.Bundle;
 
@@ -42,7 +43,7 @@ pub fn entityReg(self: *@This()) *EntityRegistry {
 
 /// Returns the archetype registry backing this world.
 pub fn archReg(self: *@This()) *ArchetypeRegistry {
-    return &self.entity_reg.arch_reg;
+    return &self.entity_reg.arche_reg;
 }
 
 /// Returns the sparse set registry backing this world.
@@ -55,21 +56,22 @@ pub fn resReg(self: *@This()) *ResourceRegistry {
     return &self.res_reg;
 }
 
-/// Inserts only if absent, using `Default` for passed types.
+/// Inserts only if absent, using `Default` for passed types; returns the resource ID.
 /// Success consumes a passed value, destroying it through `TypeMeta` if skipped.
 /// Skipped types are not constructed; on failure the caller retains the value.
-pub fn initResource(self: *@This(), value: anytype) Allocator.Error!void {
+pub fn initResource(self: *@This(), value: anytype) Allocator.Error!ResId {
     return self.res_reg.insertIfAbsent(value);
 }
 
 /// Inserts a value or constructs a type through `Default`, replacing any existing
-/// resource through `TypeMeta`. Ownership of a passed value transfers only on success.
-pub fn insertResource(self: *@This(), value: anytype) Allocator.Error!void {
+/// resource through `TypeMeta`. Returns the resource ID, preserving it on replacement.
+/// Ownership of a passed value transfers only on success.
+pub fn insertResource(self: *@This(), value: anytype) Allocator.Error!ResId {
     return self.res_reg.insert(value);
 }
 
-/// Borrows a resource for reading, returning null if absent.
-pub fn getResource(self: *const @This(), comptime T: type) ?*const T {
+/// Borrows a resource, returning null if absent.
+pub fn getResource(self: *@This(), comptime T: type) ?*T {
     return self.res_reg.get(T);
 }
 
@@ -143,8 +145,8 @@ test "addEntity registers components and creates an entity" {
         Health{ .value = 7 },
     });
 
-    const position_id = world.entity_reg.comp_reg.getByType(Position).?;
-    const health_id = world.entity_reg.comp_reg.getByType(Health).?;
+    const position_id = world.entity_reg.comp_reg.idOf(Position).?;
+    const health_id = world.entity_reg.comp_reg.idOf(Health).?;
 
     const created = world.entity_reg.get(id).?;
     try expect(created.id.eql(id));
@@ -168,7 +170,7 @@ test "addEntity delegates requirement completion to the entity registry" {
     defer world.deinit();
 
     const id = try world.addEntity(.{Root{}});
-    const required = world.compReg().getByType(Required).?;
+    const required = world.compReg().idOf(Required).?;
     try expect(world.entityReg().get(id).?.signature.has(required));
 }
 

@@ -20,7 +20,7 @@ const Bundle = reflect.Bundle;
 const Default = reflect.Default;
 
 comp_reg: ComponentRegistry,
-arch_reg: ArchetypeRegistry,
+arche_reg: ArchetypeRegistry,
 sparse_reg: SparseSetRegistry,
 entities: std.ArrayList(Entity),
 retired: std.ArrayList(EntityId),
@@ -31,7 +31,7 @@ allocator: Allocator,
 pub fn init(allocator: Allocator) @This() {
     return .{
         .comp_reg = ComponentRegistry.init(allocator),
-        .arch_reg = ArchetypeRegistry.init(allocator),
+        .arche_reg = ArchetypeRegistry.init(allocator),
         .sparse_reg = SparseSetRegistry.init(allocator),
         .entities = .empty,
         .retired = .empty,
@@ -46,7 +46,7 @@ pub fn deinit(self: *@This()) void {
     self.entities.deinit(allocator);
     self.retired.deinit(allocator);
     self.sparse_reg.deinit();
-    self.arch_reg.deinit();
+    self.arche_reg.deinit();
     self.comp_reg.deinit();
 }
 
@@ -76,20 +76,21 @@ pub fn addBundle(self: *@This(), bundle: Bundle) AddBundleError!EntityId {
     defer required.deinit(allocator);
 
     for (bundle.map.values()) |parcel| {
-        const id = self.comp_reg.getById(parcel.meta.id) orelse return error.UnknownComponentType;
-        if (self.comp_reg.getMeta(id) == null) return error.UnknownComponentType;
+        const id =
+            self.comp_reg.idOfTypeId(parcel.meta.id) orelse return error.UnknownComponentType;
+        if (self.comp_reg.getById(id) == null) return error.UnknownComponentType;
         try required.put(allocator, id, {});
     }
 
     // The ordered set doubles as a work queue. Mark on discovery to terminate cycles.
     var index: usize = 0;
     while (index < required.count()) : (index += 1) {
-        const meta = self.comp_reg.getMeta(required.keys()[index]) orelse
+        const meta = self.comp_reg.getById(required.keys()[index]) orelse
             return error.UnknownRequirement;
         for (meta.require) |id| try required.put(allocator, id, {});
     }
     for (required.keys()) |id| {
-        const meta = self.comp_reg.getMeta(id).?;
+        const meta = self.comp_reg.getById(id).?;
         if (!bundle.map.contains(meta.typeId()) and meta.default == null)
             return error.MissingRequirementDefault;
     }
@@ -102,7 +103,7 @@ pub fn addBundle(self: *@This(), bundle: Bundle) AddBundleError!EntityId {
     errdefer for (parcels.items[explicit_count..]) |*parcel| parcel.deinit(allocator);
 
     for (required.keys()) |id| {
-        const meta = self.comp_reg.getMeta(id).?;
+        const meta = self.comp_reg.getById(id).?;
         if (bundle.map.contains(meta.typeId())) continue;
         const parcel = try Parcel.initDefault(allocator, meta.type_meta, meta.default.?);
         parcels.appendAssumeCapacity(parcel);
@@ -130,7 +131,7 @@ fn addParcels(self: *@This(), parcels: []const Parcel) AddParcelsError!EntityId 
     const archetype_components = storage_split_ids[0..archetype_count];
     const sparse_components = storage_split_ids[archetype_count..];
 
-    const archetype_entry = try self.arch_reg.getOrCreate(archetype_components, self.comp_reg);
+    const archetype_entry = try self.arche_reg.getOrCreate(archetype_components, self.comp_reg);
     const archetype_id = archetype_entry.id;
     const archetype = &archetype_entry.archetype;
 
@@ -166,9 +167,9 @@ fn splitByStorage(
     var archetype_end: usize = 0;
     var sparse_start: usize = ids.len;
     for (parcels) |parcel| {
-        const meta = self.comp_reg.getMetaByType(parcel.meta.id) orelse
+        const meta = self.comp_reg.getByTypeId(parcel.meta.id) orelse
             return error.UnknownComponentType;
-        const comp_id = self.comp_reg.getById(parcel.meta.id).?;
+        const comp_id = self.comp_reg.idOfTypeId(parcel.meta.id).?;
         switch (meta.storage) {
             .archetype => {
                 ids[archetype_end] = comp_id;
@@ -206,7 +207,7 @@ fn createEntity(
     try entity.signature.add(allocator, ids);
     try entity.sparse_comps.ensureTotalCapacity(allocator, sparse_components.len);
     for (sparse_components) |comp_id| {
-        const meta = self.comp_reg.getMeta(comp_id).?;
+        const meta = self.comp_reg.getById(comp_id).?;
         const set_entry = try self.sparse_reg.getOrCreate(meta.type_meta);
         entity.sparse_comps.appendAssumeCapacity(set_entry.id);
     }
@@ -264,7 +265,7 @@ fn storeArchetypeComponents(
     row: usize,
 ) void {
     for (parcels) |parcel| {
-        const meta = self.comp_reg.getMetaByType(parcel.meta.id).?;
+        const meta = self.comp_reg.getByTypeId(parcel.meta.id).?;
         if (meta.storage != .archetype) continue;
 
         const column = archetype.meta.id_to_col.get(parcel.meta.id).?;
@@ -291,7 +292,7 @@ fn storeSparseComponents(
     while (parcel_index > 0) {
         parcel_index -= 1;
         const parcel = parcels[parcel_index];
-        const meta = self.comp_reg.getMetaByType(parcel.meta.id).?;
+        const meta = self.comp_reg.getByTypeId(parcel.meta.id).?;
         if (meta.storage != .sparse_set) continue;
 
         // Pair the reverse sparse suffix with parcels walked from the end.
@@ -369,16 +370,16 @@ test "addBundle stores components and reuses archetype and sparse storage" {
         try expectEqual(i, id.index.get());
         try expectEqual(i, entity.archetype_row);
         inline for (.{ Position, Velocity, Health }) |T|
-            try expect(entity.signature.has(registry.comp_reg.getByType(T).?));
-        const archetype = registry.arch_reg.getById(entity.archetype_id).?;
+            try expect(entity.signature.has(registry.comp_reg.idOf(T).?));
+        const archetype = registry.arche_reg.getById(entity.archetype_id).?;
         try expectArchetypeValue(archetype, Position, i, .{ .x = value, .y = 4 });
         try expectArchetypeValue(archetype, Velocity, i, .{ .dx = value, .dy = 2 });
         try expectEqual(
             @as(u32, @intCast(value)),
-            registry.sparse_reg.getByType(TypeId.of(Health)).?.set.get(Health, id).?.value,
+            registry.sparse_reg.getByTypeId(TypeId.of(Health)).?.set.get(Health, id).?.value,
         );
     }
-    try expectEqual(1, registry.arch_reg.entries.items.len);
+    try expectEqual(1, registry.arche_reg.entries.items.len);
     try expectEqual(1, registry.sparse_reg.entries.items.len);
 }
 
@@ -390,12 +391,12 @@ test "addBundle accepts an empty bundle and get rejects unknown ids" {
     const id = try registry.addBundle(try .init(allocator, .{}));
 
     try expectEqual(1, registry.entities.items.len);
-    try expectEqual(1, registry.arch_reg.entries.items.len);
+    try expectEqual(1, registry.arche_reg.entries.items.len);
 
     const entity = registry.get(id).?;
     try expectEqual(0, entity.signature.mask.count());
 
-    const archetype = registry.arch_reg.getById(entity.archetype_id).?;
+    const archetype = registry.arche_reg.getById(entity.archetype_id).?;
     try expectEqual(0, archetype.meta.columns.items.len);
     try expectEqual(1, archetype.len());
     try expect(registry.get(EntityId.init(id.index.get(), id.generation.next().get())) == null);
@@ -408,7 +409,7 @@ test "addBundle reuses a retired entity slot" {
     var registry = init(allocator);
     defer registry.deinit();
     _ = try registry.comp_reg.register(Position);
-    const position_id = registry.comp_reg.getByType(Position).?;
+    const position_id = registry.comp_reg.idOf(Position).?;
 
     const first = try registry.addBundle(try .init(allocator, .{
         Position{ .x = 1, .y = 2 },
@@ -436,7 +437,7 @@ test "addBundle reuses a retired entity slot" {
     try expect(entity.signature.has(position_id));
     try expectEqual(1, entity.archetype_row);
 
-    const archetype = registry.arch_reg.getById(entity.archetype_id).?;
+    const archetype = registry.arche_reg.getById(entity.archetype_id).?;
     try expectArchetypeValue(archetype, Position, 1, .{ .x = 3, .y = 4 });
 }
 
@@ -502,16 +503,16 @@ test "addBundle completes shared cyclic requirements and preserves explicit valu
         const a = registry.get(first).?;
         const b = registry.get(second).?;
         inline for (.{ G.Root, G.Left, G.Right, G.Shared, Health }) |T| {
-            const id = registry.comp_reg.getByType(T).?;
+            const id = registry.comp_reg.idOf(T).?;
             try expect(a.signature.has(id));
             try expect(b.signature.has(id));
         }
-        const archetype = registry.arch_reg.getById(a.archetype_id).?;
+        const archetype = registry.arche_reg.getById(a.archetype_id).?;
         try expectArchetypeValue(archetype, G.Root, a.archetype_row, .{ .value = 1 });
         try expectArchetypeValue(archetype, G.Left, a.archetype_row, .{});
         try expectArchetypeValue(archetype, G.Left, b.archetype_row, .{ .value = 33 });
-        const right = &registry.sparse_reg.getByType(TypeId.of(G.Right)).?.set;
-        const health = &registry.sparse_reg.getByType(TypeId.of(Health)).?.set;
+        const right = &registry.sparse_reg.getByTypeId(TypeId.of(G.Right)).?.set;
+        const health = &registry.sparse_reg.getByTypeId(TypeId.of(Health)).?.set;
         try expectEqual(22, right.get(G.Right, first).?.value);
         try expectEqual(44, right.get(G.Right, second).?.value);
         try expectEqual(55, health.get(Health, first).?.value);
@@ -645,14 +646,14 @@ fn testRequirementAllocationFailures(allocator: Allocator) !void {
             try expectEqual(ptr, bundle.map.values()[1].ptr);
             try expectEqual(AutoRequirement.created, AutoRequirement.destroyed);
             try expectEqual(0, registry.entities.items.len);
-            for (registry.arch_reg.entries.items) |*entry|
+            for (registry.arche_reg.entries.items) |*entry|
                 try expectEqual(0, entry.archetype.len());
             for (registry.sparse_reg.entries.items) |*entry| try expectEqual(0, entry.set.len());
             return err;
         };
         consumed = true;
         try expect(registry.get(id).?.signature
-            .has(registry.comp_reg.getByType(AutoRequirement).?));
+            .has(registry.comp_reg.idOf(AutoRequirement).?));
         try expectEqual(0, calls);
         try expectEqual(1, AutoRequirement.created);
         try expectEqual(0, AutoRequirement.destroyed);

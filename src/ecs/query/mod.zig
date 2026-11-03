@@ -92,7 +92,7 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
 
                     inline for (comp_types, 0..) |maybe, i| {
                         targets[i] = if (maybe) |T| .{
-                            .id = world.compReg().getByType(T) orelse @panic(
+                            .id = world.compReg().idOf(T) orelse @panic(
                                 @typeName(T) ++ " is not registered in the component registry",
                             ),
                             .type_id = TypeId.of(T),

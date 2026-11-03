@@ -59,7 +59,7 @@ pub fn init(
 
     try self.columns.ensureTotalCapacity(allocator, unsorted.len);
     for (unsorted) |id| {
-        const comp_meta = registry.getMeta(id) orelse unreachable;
+        const comp_meta = registry.getById(id) orelse unreachable;
         self.columns.appendAssumeCapacity(.{ .id = id, .meta = comp_meta.type_meta });
     }
     std.mem.sort(Entry, self.columns.items, {}, Entry.lessThan);

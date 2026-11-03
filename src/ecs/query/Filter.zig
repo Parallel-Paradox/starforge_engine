@@ -93,10 +93,10 @@ pub const Leaf = struct {
             };
 
             pub fn node(comp_reg: *const CompReg) Node {
-                const comp_id = comp_reg.getByType(T) orelse @panic(
+                const comp_id = comp_reg.idOf(T) orelse @panic(
                     @typeName(T) ++ " is not registered in the component registry",
                 );
-                const meta = comp_reg.getMeta(comp_id).?;
+                const meta = comp_reg.getById(comp_id).?;
                 return Node{ .leaf = .{
                     .comp_id = comp_id,
                     .storage = meta.storage,
