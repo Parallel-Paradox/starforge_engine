@@ -1,12 +1,14 @@
-//! Owns one resource per storage `TypeId`, backed by individually allocated parcels.
-//! Typed methods normalize comptime integers/floats to `isize`/`f64`; `Id` methods
-//! use the supplied storage type id directly.
+//! Owns one resource per `TypeId`, backed by individually allocated parcels.
+//! Insert marked resource values directly, or pass their types to construct defaults
+//! through `reflect.Default`. Values are destroyed through `reflect.TypeMeta`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const engine = @import("engine");
+const resource = engine.ecs.resource;
 const reflect = engine.reflect;
+const Default = reflect.Default;
 const TypeId = reflect.TypeId;
 const Parcel = reflect.Parcel;
 
@@ -17,7 +19,7 @@ pub fn init(allocator: Allocator) @This() {
     return .{ .allocator = allocator };
 }
 
-/// Destroys every resource and frees the registry's storage.
+/// Destroys every resource through `TypeMeta` and frees the registry's storage.
 /// Invalidates all borrowed resource pointers.
 pub fn deinit(self: *@This()) void {
     var iter = self.entries.valueIterator();
@@ -26,15 +28,62 @@ pub fn deinit(self: *@This()) void {
     self.entries = .empty;
 }
 
-/// Stores `value`, destroying any previous resource of its storage type.
-/// Transfers ownership only on success; failure leaves the existing resource unchanged.
+/// Stores a marked resource value, or constructs a passed type with `Default.of`.
+/// Replaces and destroys any previous resource through `TypeMeta`.
+/// Ownership transfers only on success; failure preserves the old resource
+/// and destroys any generated default value.
 pub fn insert(self: *@This(), value: anytype) Allocator.Error!void {
+    const T = if (@TypeOf(value) == type) value else @TypeOf(value);
+    comptime resource.assertResource(T, "Registry.insert");
+
+    if (comptime @TypeOf(value) == type) {
+        var default_value = Default.of(T);
+        errdefer switch (reflect.TypeMeta.of(T).need_deinit) {
+            .trivial => {},
+            .managed => |deinitFn| deinitFn(&default_value),
+        };
+        return self.insert(default_value);
+    }
+
     var parcel = try Parcel.init(self.allocator, value);
     errdefer parcel.releaseStorage(self.allocator);
+    try self.insertParcel(parcel);
+}
 
+/// Inserts a resource value or constructs a type through `Default` only if absent.
+/// Success consumes passed values, destroying skipped ones through `TypeMeta`.
+/// Skipped types are not constructed; on failure the caller retains the value.
+pub fn insertIfAbsent(self: *@This(), value: anytype) Allocator.Error!void {
+    const T = if (@TypeOf(value) == type) value else @TypeOf(value);
+    if (!self.contains(T)) return self.insert(value);
+
+    if (comptime @TypeOf(value) != type) {
+        var skipped = value;
+        switch (reflect.TypeMeta.of(T).need_deinit) {
+            .trivial => {},
+            .managed => |deinitFn| deinitFn(&skipped),
+        }
+    }
+}
+
+/// Stores a parcel for dynamic or script registration, destroying any previous value.
+///
+/// WARNING: unchecked metadata; requires exclusive ownership and this registry's allocator.
+/// Bypasses `se_resource`. Ownership transfers only on success.
+pub fn insertParcel(self: *@This(), parcel: Parcel) Allocator.Error!void {
     const entry = try self.entries.getOrPut(self.allocator, parcel.meta.id);
     if (entry.found_existing) entry.value_ptr.deinit(self.allocator);
     entry.value_ptr.* = parcel;
+}
+
+/// Inserts only if absent; otherwise destroys the passed parcel through `TypeMeta`.
+///
+/// WARNING: see `insertParcel`. Ownership transfers only on success.
+pub fn insertParcelIfAbsent(self: *@This(), parcel: Parcel) Allocator.Error!void {
+    if (!self.containsId(parcel.meta.id)) return self.insertParcel(parcel);
+
+    var skipped = parcel;
+    skipped.deinit(self.allocator);
 }
 
 /// Whether a resource of `T`'s storage type exists.
@@ -99,104 +148,119 @@ pub fn takeId(self: *@This(), id: TypeId) ?Parcel {
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
-const checkAllAllocationFailures = std.testing.checkAllAllocationFailures;
 
 const Probe = struct {
-    calls: *usize,
-    value: u32 = 0,
+    pub const se_resource: resource.Mark = .{};
+    var defaults: usize = 0;
+    var destroyed: usize = 0;
 
-    pub fn deinit(self: *@This()) void {
-        self.calls.* += 1;
+    value: u32,
+
+    pub fn default() @This() {
+        defaults += 1;
+        return .{ .value = 7 };
+    }
+
+    pub fn deinit(_: *@This()) void {
+        destroyed += 1;
     }
 };
 
-test "typed and runtime access share resources keyed by type" {
+test "typed and runtime access share storage" {
+    Probe.destroyed = 0;
     var registry = init(std.testing.allocator);
     defer registry.deinit();
-    const id = TypeId.of(u32);
+    const id = TypeId.of(Probe);
     const view: *const @This() = &registry;
 
     try expect(!view.containsId(id));
-    try expect(view.get(u32) == null);
-    try expect(registry.getMutId(id) == null);
-    try expect(registry.take(u32) == null);
+    try expect(view.get(Probe) == null);
+    try registry.insert(Probe{ .value = 11 });
+    try expect(view.contains(Probe));
+    registry.getMut(Probe).?.value = 19;
+    const bytes = view.getId(id).?;
+    try expectEqual(@sizeOf(Probe), bytes.len);
+    const write: *Probe = @ptrCast(@alignCast(registry.getMutId(id).?.ptr));
+    write.value += 1;
+    try expectEqual(20, view.get(Probe).?.value);
 
-    try registry.insert(@as(u32, 7));
-    try registry.insert(@as(i32, 11));
-    try expect(view.contains(u32));
-    try expect(view.containsId(id));
-    registry.getMut(u32).?.* = 19;
-    const read_bytes = view.getId(id).?;
-    try expectEqual(@sizeOf(u32), read_bytes.len);
-    const read: *const u32 = @ptrCast(@alignCast(read_bytes.ptr));
-    try expectEqual(19, read.*);
-    const write_bytes = registry.getMutId(TypeId.of(i32)).?;
-    try expectEqual(@sizeOf(i32), write_bytes.len);
-    const write: *i32 = @ptrCast(@alignCast(write_bytes.ptr));
-    write.* = 23;
-    try expectEqual(23, view.get(i32).?.*);
-
-    try expect(registry.removeId(TypeId.of(i32)));
-    try expect(!registry.remove(i32));
-    try expect(view.getId(TypeId.of(i32)) == null);
-    try expect(view.contains(u32));
+    var parcel = try Parcel.init(registry.allocator, @as(u64, 42));
+    registry.insertParcelIfAbsent(parcel) catch |err| {
+        parcel.deinit(registry.allocator);
+        return err;
+    };
+    var taken = registry.takeId(TypeId.of(u64)).?;
+    defer taken.deinit(registry.allocator);
+    try expectEqual(42, taken.take(u64, registry.allocator));
+    try expect(registry.takeId(TypeId.of(u64)) == null);
+    try expect(registry.removeId(id));
+    try expectEqual(1, Probe.destroyed);
+    try expect(!registry.remove(Probe));
 }
 
-test "replacement, removal and destruction respect resource ownership" {
-    const allocator = std.testing.allocator;
-    var calls: usize = 0;
+test "insertion modes preserve resource ownership" {
+    Probe.defaults = 0;
+    Probe.destroyed = 0;
     {
-        var registry = init(allocator);
+        var registry = init(std.testing.allocator);
         defer registry.deinit();
 
-        try registry.insert(Probe{ .calls = &calls, .value = 1 });
-        try registry.insert(Probe{ .calls = &calls, .value = 2 });
-        try expectEqual(1, calls);
-        try expectEqual(2, registry.get(Probe).?.value);
+        try registry.insertIfAbsent(Probe);
+        const original = registry.get(Probe).?;
+        try registry.insertIfAbsent(Probe);
+        try registry.insertIfAbsent(Probe{ .value = 11 });
+        var parcel = try Parcel.init(registry.allocator, Probe{ .value = 22 });
+        registry.insertParcelIfAbsent(parcel) catch |err| {
+            parcel.deinit(registry.allocator);
+            return err;
+        };
+        try expect(registry.get(Probe).? == original);
+        try expectEqual(7, original.value);
+        try expectEqual(1, Probe.defaults);
+        try expectEqual(2, Probe.destroyed);
 
+        try registry.insert(Probe);
+        try expectEqual(2, Probe.defaults);
+        try expectEqual(3, Probe.destroyed);
         var value = registry.take(Probe).?;
         try expect(!registry.contains(Probe));
-        try expectEqual(1, calls);
+        try expectEqual(3, Probe.destroyed);
         value.deinit();
+        try registry.insert(Probe{ .value = 33 });
+    }
+    try expectEqual(5, Probe.destroyed);
+}
 
-        try registry.insert(Probe{ .calls = &calls });
+fn testAllocationFailures(allocator: Allocator) !void {
+    inline for (.{ false, true }) |use_default| {
+        Probe.defaults = 0;
+        Probe.destroyed = 0;
         {
-            var parcel = registry.takeId(TypeId.of(Probe)).?;
-            defer parcel.deinit(allocator);
-            try expect(registry.takeId(TypeId.of(Probe)) == null);
-            try expectEqual(2, calls);
-        }
+            var registry = init(allocator);
+            defer registry.deinit();
 
-        try registry.insert(Probe{ .calls = &calls });
-        try expect(registry.remove(Probe));
-        try expectEqual(4, calls);
-        try registry.insert(Probe{ .calls = &calls });
+            for (0..2) |i| {
+                var value: Probe = .{ .value = @intCast(i) };
+                const previous = registry.get(Probe);
+                const result = if (use_default) registry.insert(Probe) else registry.insert(value);
+                result catch |err| {
+                    defer if (!use_default) value.deinit();
+                    try expect(previous == registry.get(Probe));
+                    if (previous) |stored|
+                        try expectEqual(if (use_default) @as(u32, 7) else 0, stored.value);
+                    if (use_default) {
+                        try expectEqual(Probe.defaults, Probe.destroyed + registry.entries.count());
+                    } else {
+                        try expectEqual(0, Probe.destroyed);
+                    }
+                    return err;
+                };
+            }
+        }
+        try expectEqual(2, Probe.destroyed);
     }
-    try expectEqual(5, calls);
 }
 
-fn testInsertAllocationFailures(allocator: Allocator) !void {
-    var calls: usize = 0;
-    {
-        var registry = init(allocator);
-        defer registry.deinit();
-
-        for (0..2) |i| {
-            var value: Probe = .{ .calls = &calls, .value = @intCast(i) };
-            const previous = registry.get(Probe);
-            registry.insert(value) catch |err| {
-                defer value.deinit();
-                try expectEqual(0, calls);
-                try expect(previous == registry.get(Probe));
-                if (previous) |stored| try expectEqual(0, stored.value);
-                return err;
-            };
-        }
-        try expectEqual(1, calls);
-    }
-    try expectEqual(2, calls);
-}
-
-test "failed insertion or replacement preserves ownership and existing resources" {
-    try checkAllAllocationFailures(std.testing.allocator, testInsertAllocationFailures, .{});
+test "allocation failures preserve existing resources and clean up owned values" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testAllocationFailures, .{});
 }

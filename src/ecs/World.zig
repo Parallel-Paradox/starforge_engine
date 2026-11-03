@@ -55,6 +55,29 @@ pub fn resReg(self: *@This()) *ResourceRegistry {
     return &self.res_reg;
 }
 
+/// Inserts only if absent, using `Default` for passed types.
+/// Success consumes a passed value, destroying it through `TypeMeta` if skipped.
+/// Skipped types are not constructed; on failure the caller retains the value.
+pub fn initResource(self: *@This(), value: anytype) Allocator.Error!void {
+    return self.res_reg.insertIfAbsent(value);
+}
+
+/// Inserts a value or constructs a type through `Default`, replacing any existing
+/// resource through `TypeMeta`. Ownership of a passed value transfers only on success.
+pub fn insertResource(self: *@This(), value: anytype) Allocator.Error!void {
+    return self.res_reg.insert(value);
+}
+
+/// Borrows a resource for reading, returning null if absent.
+pub fn getResource(self: *const @This(), comptime T: type) ?*const T {
+    return self.res_reg.get(T);
+}
+
+/// Removes and destroys a resource through `TypeMeta`, returning whether it existed.
+pub fn removeResource(self: *@This(), comptime T: type) bool {
+    return self.res_reg.remove(T);
+}
+
 /// Creates an entity from a struct or tuple of component values.
 ///
 /// Every field type must be a component, or a struct marked as a bundle whose fields are
