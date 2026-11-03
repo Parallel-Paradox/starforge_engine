@@ -4,6 +4,7 @@
 //! `fn deinit(self: *T) void` is called automatically; other types are treated as trivial.
 
 const engine = @import("engine");
+const World = engine.ecs.World;
 
 pub const Id = engine.ecs.Id;
 pub const Registry = @import("Registry.zig");
@@ -31,8 +32,70 @@ pub fn assertResource(comptime T: type, comptime context: ?[]const u8) void {
     );
 }
 
+/// A system parameter borrowing a required resource through `*const T`.
+pub fn Res(comptime T: type) type {
+    return ResourceParam(T, false);
+}
+
+/// A system parameter borrowing a required resource through `*T`.
+pub fn ResMut(comptime T: type) type {
+    return ResourceParam(T, true);
+}
+
+fn ResourceParam(comptime T: type, comptime mutable: bool) type {
+    const name = if (mutable) "ResMut" else "Res";
+    assertResource(T, name);
+    return struct {
+        ptr: if (mutable) *T else *const T,
+
+        /// Borrows the current resource without constructing or registering it.
+        /// Panics if it is absent. Uses the parameter protocol's default World context.
+        pub fn extract(world: *World) error{}!@This() {
+            return .{ .ptr = world.getResource(T) orelse @panic(
+                name ++ "(" ++ @typeName(T) ++
+                    ") requires a resource that is not present in the world",
+            ) };
+        }
+    };
+}
+
 test {
     _ = Registry;
+}
+
+test "resource parameters borrow shared storage and extract current values" {
+    const testing = @import("std").testing;
+    const param = engine.ecs.system.param;
+    const Counter = struct {
+        pub const se_resource: Mark = .{};
+        value: u32,
+    };
+    var world = World.init(testing.allocator);
+    defer world.deinit();
+    _ = try world.insertResource(Counter{ .value = 1 });
+
+    try testing.expect(param.Context(Res(Counter)) == World);
+    try testing.expect(param.Context(ResMut(Counter)) == World);
+    const read = try param.extractParam(Res(Counter), &world);
+    const write = try param.extractParam(ResMut(Counter), &world);
+    try testing.expect(@TypeOf(read.ptr) == *const Counter);
+    try testing.expect(@TypeOf(write.ptr) == *Counter);
+    try testing.expect(read.ptr == write.ptr);
+    try testing.expect(write.ptr == world.getResource(Counter).?);
+    write.ptr.value += 1;
+    try testing.expectEqual(2, read.ptr.value);
+
+    _ = try world.insertResource(Counter{ .value = 7 });
+    inline for (.{ Res(Counter), ResMut(Counter) }) |P| {
+        const current = try P.extract(&world);
+        try testing.expectEqual(7, current.ptr.value);
+    }
+    try testing.expect(world.removeResource(Counter));
+    _ = try world.insertResource(Counter{ .value = 11 });
+    inline for (.{ Res(Counter), ResMut(Counter) }) |P| {
+        const current = try P.extract(&world);
+        try testing.expectEqual(11, current.ptr.value);
+    }
 }
 
 test "resource markers must have type Mark" {
