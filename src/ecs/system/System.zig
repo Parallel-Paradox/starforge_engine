@@ -7,7 +7,7 @@ ptr: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
-    run: *const fn (self: *anyopaque, world: *World) void,
+    run: *const fn (self: *anyopaque, world: *World) anyerror!void,
     deinit: *const fn (self: *anyopaque) void,
 };
 
