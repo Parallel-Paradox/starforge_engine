@@ -15,8 +15,8 @@ const Signature = ecs.entity.Signature;
 const ArchetypeId = ecs.entity.archetype.Id;
 const ArchetypeRegistry = ecs.entity.archetype.Registry;
 const SparseSetId = ecs.entity.sparse_set.Id;
-const Filter = ecs.system.param.query.Filter;
-const Iter = ecs.system.param.query.Iter;
+const Filter = ecs.query.Filter;
+const Iter = ecs.query.Iter;
 const TypeId = engine.reflect.TypeId;
 
 /// A query target field resolved from its compile-time type.

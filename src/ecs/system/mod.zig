@@ -1,4 +1,4 @@
-pub const param = @import("param/mod.zig");
+pub const param = @import("param.zig");
 
 pub const System = @import("System.zig");
 

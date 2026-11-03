@@ -1,9 +1,8 @@
 const std = @import("std");
 
-pub const query = @import("query/mod.zig");
-
 const engine = @import("engine");
 const World = engine.ecs.World;
+const query = engine.ecs.query;
 
 /// The storage a parameter keeps between extractions; `World` when it needs
 /// none, including for parameters that are not declarations-bearing types.
@@ -54,10 +53,6 @@ fn assertContext(comptime C: type) void {
 pub fn extractParam(comptime P: type, ctx: *Context(P)) !P {
     if (P == *World) return ctx;
     return P.extract(ctx);
-}
-
-test {
-    _ = query;
 }
 
 test "Context is World for parameters without one" {

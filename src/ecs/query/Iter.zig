@@ -4,7 +4,7 @@ const std = @import("std");
 
 const engine = @import("engine");
 const ecs = engine.ecs;
-const State = ecs.system.param.query.State;
+const State = ecs.query.State;
 const ArchetypeIter = ecs.entity.archetype.Iter;
 const SparseSet = ecs.entity.sparse_set.SparseSet;
 
