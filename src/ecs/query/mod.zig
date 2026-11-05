@@ -227,7 +227,7 @@ fn drain(query: anytype) usize {
 
 test "queries yield target fields and write through pointers" {
     const allocator = std.testing.allocator;
-    var world = World.init(allocator);
+    var world = World.init(allocator, std.testing.io);
     defer world.deinit();
 
     _ = try world.addEntity(.{Velocity{ .dx = 7, .dy = 8 }});
@@ -283,7 +283,7 @@ test "queries yield target fields and write through pointers" {
 
 test "sparse components are matched per entity" {
     const allocator = std.testing.allocator;
-    var world = World.init(allocator);
+    var world = World.init(allocator, std.testing.io);
     defer world.deinit();
 
     const both = try world.addEntity(.{
@@ -365,7 +365,7 @@ test "sparse components are matched per entity" {
 
 test "filters narrow the archetypes a query visits" {
     const allocator = std.testing.allocator;
-    var world = World.init(allocator);
+    var world = World.init(allocator, std.testing.io);
     defer world.deinit();
 
     const moving = try world.addEntity(.{
@@ -424,7 +424,7 @@ test "filters narrow the archetypes a query visits" {
 
 test "extract refreshes the cached archetypes" {
     const allocator = std.testing.allocator;
-    var world = World.init(allocator);
+    var world = World.init(allocator, std.testing.io);
     defer world.deinit();
 
     _ = try world.addEntity(.{Position{ .x = 1, .y = 2 }});
@@ -473,7 +473,7 @@ const Small = struct {
 
 test "queries walk every chunk of an archetype" {
     const allocator = std.testing.allocator;
-    var world = World.init(allocator);
+    var world = World.init(allocator, std.testing.io);
     defer world.deinit();
 
     for (0..3) |index| {

@@ -84,7 +84,7 @@ test "resource parameters cache their id and borrow shared storage" {
         pub const se_resource: Mark = .{};
         value: u32,
     };
-    var world = World.init(testing.allocator);
+    var world = World.init(testing.allocator, testing.io);
     defer world.deinit();
     const id = try world.insertResource(Counter{ .value = 1 });
 

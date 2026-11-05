@@ -17,12 +17,14 @@ const Bundle = engine.reflect.Bundle;
 entity_reg: EntityRegistry,
 res_reg: ResourceRegistry,
 allocator: Allocator,
+io: std.Io,
 
-pub fn init(allocator: Allocator) @This() {
+pub fn init(allocator: Allocator, io: std.Io) @This() {
     return .{
         .entity_reg = EntityRegistry.init(allocator),
         .res_reg = ResourceRegistry.init(allocator),
         .allocator = allocator,
+        .io = io,
     };
 }
 
@@ -137,7 +139,7 @@ const Huge = struct {
 
 test "addEntity registers components and creates an entity" {
     const allocator = std.testing.allocator;
-    var world = init(allocator);
+    var world = init(allocator, std.testing.io);
     defer world.deinit();
 
     const id = try world.addEntity(.{
@@ -166,7 +168,7 @@ test "addEntity delegates requirement completion to the entity registry" {
         pub const se_component: TestMark = .{ .require = &.{Required} };
     };
     const allocator = std.testing.allocator;
-    var world = init(allocator);
+    var world = init(allocator, std.testing.io);
     defer world.deinit();
 
     const id = try world.addEntity(.{Root{}});
@@ -176,7 +178,7 @@ test "addEntity delegates requirement completion to the entity registry" {
 
 test "addEntity releases the temporary bundle without disposing copied values" {
     const allocator = std.testing.allocator;
-    var world = init(allocator);
+    var world = init(allocator, std.testing.io);
     defer world.deinit();
 
     var calls: usize = 0;

@@ -163,7 +163,7 @@ test "ContextList keeps one slot per parameter, void for World contexts" {
 }
 
 test "build, run and deinit manage the system and its contexts" {
-    var world = World.init(std.testing.allocator);
+    var world = World.init(std.testing.allocator, std.testing.io);
     defer world.deinit();
     _ = try world.insertResource(Probe{});
 
@@ -188,7 +188,7 @@ test "a system without parameters receives an empty argument list" {
         }
     };
 
-    var world = World.init(std.testing.allocator);
+    var world = World.init(std.testing.allocator, std.testing.io);
     defer world.deinit();
 
     var system = try Builder(NoParams.run).build(&world);
@@ -209,7 +209,7 @@ test "resource parameters resolve their id during build" {
         }
     };
 
-    var world = World.init(std.testing.allocator);
+    var world = World.init(std.testing.allocator, std.testing.io);
     defer world.deinit();
     _ = try world.insertResource(Counter{ .value = 3 });
 
