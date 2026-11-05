@@ -1,6 +1,6 @@
 //! Compile-time filters compiled into a flat, breadth-first node array.
 //!
-//! `With`/`Without`/`All`/`Any` build a comptime tree of types; `init` normalizes the
+//! `With`/`Without`/`All`/`Any` build a comptime tree of values; `init` normalizes the
 //! root, lays the tree out breadth-first, and snapshots component ids from the
 //! registry. Runtime judging then walks `nodes` without touching comptime data.
 //!
@@ -26,7 +26,30 @@ pub const empty: @This() = .{};
 /// Breadth-first nodes; empty when the filter matches everything.
 nodes: []Node = &.{},
 
-pub const Node = union(enum) { leaf: Leaf, branch: Branch };
+pub const Node = union(enum) {
+    leaf: Leaf,
+    branch: Branch,
+
+    /// Compile-time filter description. Component types are resolved against a registry by `init`.
+    pub const Spec = union(enum) {
+        leaf: Leaf.Spec,
+        branch: struct {
+            kind: Branch.Kind,
+            children: []const Spec,
+        },
+
+        pub fn nodeCount(comptime self: Spec) usize {
+            return comptime switch (self) {
+                .leaf => 1,
+                .branch => |branch| blk: {
+                    var total: usize = 1;
+                    for (branch.children) |child| total += child.nodeCount();
+                    break :blk total;
+                },
+            };
+        }
+    };
+};
 
 /// Outcome of evaluating a filter against an archetype signature.
 pub const Decision = enum {
@@ -55,82 +78,55 @@ pub const Decision = enum {
 pub const Leaf = struct {
     comp_id: CompId,
     storage: Storage,
-    vtable: *const VTable,
+    require: bool,
 
-    pub const VTable = struct {
-        judgeArchetype: *const fn (comp_id: CompId, storage: Storage, sig: Signature) Decision,
-        judgeEntity: *const fn (comp_id: CompId, storage: Storage, sig: Signature) bool,
+    pub const Spec = struct {
+        component: type,
+        require: bool,
     };
 
     pub fn judgeArchetype(self: @This(), sig: Signature) Decision {
-        return self.vtable.judgeArchetype(self.comp_id, self.storage, sig);
+        if (self.storage == .sparse_set) return .per_entity;
+        return if (sig.has(self.comp_id) == self.require) .accept else .reject;
     }
 
     pub fn judgeEntity(self: @This(), sig: Signature) bool {
-        return self.vtable.judgeEntity(self.comp_id, self.storage, sig);
-    }
-
-    fn Builder(comptime T: type, comptime require: bool) type {
-        comptime engine.ecs.component.assertComponent(T, "Filter.Leaf");
-
-        return struct {
-            pub const child_cnt: usize = 0;
-            pub const node_cnt: usize = 1;
-
-            fn _judgeArchetype(comp_id: CompId, storage: Storage, sig: Signature) Decision {
-                if (storage == .sparse_set) return .per_entity;
-                return if (sig.has(comp_id) == require) .accept else .reject;
-            }
-
-            fn _judgeEntity(comp_id: CompId, storage: Storage, sig: Signature) bool {
-                if (storage != .sparse_set) return true;
-                return sig.has(comp_id) == require;
-            }
-
-            pub const vtable: VTable = .{
-                .judgeArchetype = &_judgeArchetype,
-                .judgeEntity = &_judgeEntity,
-            };
-
-            pub fn node(comp_reg: *const CompReg) Node {
-                const comp_id = comp_reg.idOf(T) orelse @panic(
-                    @typeName(T) ++ " is not registered in the component registry",
-                );
-                const meta = comp_reg.getById(comp_id).?;
-                return Node{ .leaf = .{
-                    .comp_id = comp_id,
-                    .storage = meta.storage,
-                    .vtable = &vtable,
-                } };
-            }
-        };
+        if (self.storage != .sparse_set) return true;
+        return sig.has(self.comp_id) == self.require;
     }
 };
 
-fn Leaves(comptime arg: anytype, comptime require: bool) type {
+fn leaves(comptime arg: anytype, comptime require: bool) Node.Spec {
     switch (@typeInfo(@TypeOf(arg))) {
-        .type => return Leaf.Builder(arg, require),
+        .type => {
+            ecs.component.assertComponent(arg, "Filter.Leaf");
+            return .{ .leaf = .{ .component = arg, .require = require } };
+        },
         .@"struct" => |info| if (info.is_tuple) {
-            const leaves = blk: {
-                var out: [arg.len]type = undefined;
-                inline for (arg, 0..) |T, i| out[i] = Leaf.Builder(T, require);
+            const children = blk: {
+                var out: [arg.len]Node.Spec = undefined;
+                for (arg, 0..) |T, i| {
+                    if (@TypeOf(T) != type)
+                        @compileError("With/Without expects a component type or a tuple of them");
+                    out[i] = leaves(T, require);
+                }
                 break :blk out;
             };
-            return Branch.Builder(.all, &leaves);
+            return Branch.spec(.all, &children);
         },
         else => {},
     }
     @compileError("With/Without expects a component type or a tuple of them");
 }
 
-/// Returns the node type that requires `arg`.
-pub fn With(comptime arg: anytype) type {
-    return Leaves(arg, true);
+/// Returns a filter description that requires `arg`.
+pub fn With(comptime arg: anytype) Node.Spec {
+    return leaves(arg, true);
 }
 
-/// Returns the node type that forbids `arg`.
-pub fn Without(comptime arg: anytype) type {
-    return Leaves(arg, false);
+/// Returns a filter description that forbids `arg`.
+pub fn Without(comptime arg: anytype) Node.Spec {
+    return leaves(arg, false);
 }
 
 pub const Branch = struct {
@@ -139,30 +135,20 @@ pub const Branch = struct {
 
     pub const Kind = enum { all, any };
 
-    fn Builder(comptime kind_: Kind, comptime children_: []const type) type {
-        if (children_.len == 1) return children_[0];
-
-        return struct {
-            pub const kind: Kind = kind_;
-            pub const children: []const type = children_;
-            pub const child_cnt: usize = children_.len;
-            pub const node_cnt: usize = blk: {
-                var total: usize = 1;
-                for (children_) |child| total += child.node_cnt;
-                break :blk total;
-            };
-        };
+    pub fn spec(comptime kind: Kind, comptime children: []const Node.Spec) Node.Spec {
+        if (children.len == 1) return children[0];
+        return .{ .branch = .{ .kind = kind, .children = children } };
     }
 };
 
-pub fn All(comptime list: anytype) type {
+pub fn All(comptime list: anytype) Node.Spec {
     assertFilters(list, "All");
-    return Branch.Builder(.all, &typesOf(list));
+    return Branch.spec(.all, &specsOf(list));
 }
 
-pub fn Any(comptime list: anytype) type {
+pub fn Any(comptime list: anytype) Node.Spec {
     assertFilters(list, "Any");
-    return Branch.Builder(.any, &typesOf(list));
+    return Branch.spec(.any, &specsOf(list));
 }
 
 fn assertFilters(comptime list: anytype, comptime name: []const u8) void {
@@ -175,18 +161,17 @@ fn assertFilters(comptime list: anytype, comptime name: []const u8) void {
     }
 
     inline for (list) |child| {
-        if (comptime @TypeOf(child) != type) {
+        if (@TypeOf(child) != Node.Spec) {
             @compileError(name ++
-                " expects Filter types, found a value of type " ++ @typeName(@TypeOf(child)));
-        } else if (comptime !@hasDecl(child, "node_cnt")) {
-            @compileError(name ++ " expects Filter types, " ++ @typeName(child) ++ " is not one");
+                " expects Filter descriptions, found a value of type " ++
+                @typeName(@TypeOf(child)));
         }
     }
 }
 
-fn typesOf(comptime list: anytype) [list.len]type {
-    var out: [list.len]type = undefined;
-    inline for (list, 0..) |child, i| out[i] = child;
+fn specsOf(comptime list: anytype) [list.len]Node.Spec {
+    var out: [list.len]Node.Spec = undefined;
+    for (list, 0..) |child, i| out[i] = child;
     return out;
 }
 
@@ -195,89 +180,84 @@ pub fn init(
     comp_reg: *const CompReg,
     comptime filter: anytype,
 ) Allocator.Error!@This() {
-    const Root = comptime NormalizeRoot(filter);
-
-    // A root that matches everything owns no nodes. Zero-length allocations and
-    // frees are no-ops, so this stays off the heap.
-    if (comptime Root.node_cnt == 0) return initWithCount(allocator, 0);
-
-    const self = try initWithCount(allocator, Root.node_cnt);
-    const seed = comptime getSeed(Root);
-    for (seed, 0..) |entry, i| {
+    const root = (comptime normalizeRoot(filter)) orelse return initWithCount(allocator, 0);
+    const self = try initWithCount(allocator, comptime root.nodeCount());
+    const seed = comptime getSeed(root);
+    inline for (seed, 0..) |entry, i| {
         self.nodes[i] = switch (entry) {
-            .leaf => |leaf| leaf(comp_reg),
+            .leaf => |leaf| blk: {
+                const T = leaf.component;
+                const comp_id = comp_reg.idOf(T) orelse @panic(
+                    @typeName(T) ++ " is not registered in the component registry",
+                );
+                const meta = comp_reg.getById(comp_id).?;
+                break :blk .{ .leaf = .{
+                    .comp_id = comp_id,
+                    .storage = meta.storage,
+                    .require = leaf.require,
+                } };
+            },
             .branch => |branch| .{ .branch = branch },
         };
     }
     return self;
 }
 
-const Empty = struct {
-    pub const node_cnt: usize = 0;
-    pub const child_cnt: usize = 0;
-    pub const children: [0]type = .{};
-};
-
-fn NormalizeRoot(comptime filter: anytype) type {
+fn normalizeRoot(comptime filter: anytype) ?Node.Spec {
+    if (@TypeOf(filter) == Node.Spec) return filter;
     switch (@typeInfo(@TypeOf(filter))) {
-        .type => {
-            if (comptime !@hasDecl(filter, "node_cnt"))
-                @compileError("init expects a Filter type, got " ++ @typeName(filter));
-            return filter;
-        },
         .@"struct" => |info| if (info.is_tuple) {
             assertFilters(filter, "init");
             return switch (filter.len) {
-                0 => Empty,
-                1 => filter[0], // .{With(A)} -> With(A)
-                else => All(filter), // .{F1, F2} -> All
+                0 => null,
+                else => All(filter),
             };
         },
         else => {},
     }
-    @compileError("init expects a Filter type or a tuple of Filter types");
+    @compileError("init expects a Filter description or a tuple of Filter descriptions");
 }
 
 const Seed = union(enum) {
-    leaf: *const fn (*const CompReg) Node,
+    leaf: Leaf.Spec,
     branch: Branch,
 };
 
-/// Lays out `Root` breadth-first: the root sits at index 0 and every branch owns a
-/// contiguous `child_span`, so spans are always `end - start == child_cnt`.
-fn getSeed(comptime Root: type) [Root.node_cnt]Seed {
-    var seed: [Root.node_cnt]Seed = undefined;
-    var queue: [Root.node_cnt]type = undefined;
-    var slots: [Root.node_cnt]usize = undefined;
+/// Lays out `root` breadth-first: the root sits at index 0 and every branch owns a
+/// contiguous `child_span` covering its direct children.
+fn getSeed(comptime root: Node.Spec) [root.nodeCount()]Seed {
+    var seed: [root.nodeCount()]Seed = undefined;
+    var queue: [root.nodeCount()]Node.Spec = undefined;
+    var slots: [root.nodeCount()]usize = undefined;
     var head: usize = 0;
     var tail: usize = 1;
     var next_free: usize = 1;
 
-    queue[0] = Root;
+    queue[0] = root;
     slots[0] = 0;
 
     while (head < tail) : (head += 1) {
-        const T = queue[head];
         const slot = slots[head];
 
-        if (comptime @hasDecl(T, "kind")) {
-            seed[slot] = .{ .branch = .{
-                .kind = T.kind,
-                .child_span = .{ .start = next_free, .end = next_free + T.child_cnt },
-            } };
-            inline for (T.children) |child| {
-                queue[tail] = child;
-                slots[tail] = next_free;
-                tail += 1;
-                next_free += 1;
-            }
-        } else {
-            seed[slot] = .{ .leaf = &T.node };
+        switch (queue[head]) {
+            .branch => |branch| {
+                seed[slot] = .{ .branch = .{
+                    .kind = branch.kind,
+                    .child_span = .{ .start = next_free, .end = next_free + branch.children.len },
+                } };
+                for (branch.children) |child| {
+                    queue[tail] = child;
+                    slots[tail] = next_free;
+                    tail += 1;
+                    next_free += 1;
+                }
+            },
+            .leaf => |leaf| seed[slot] = .{ .leaf = leaf },
         }
     }
 
-    if (next_free != Root.node_cnt)
-        @compileError("node_cnt does not match the breadth-first seed layout");
+    if (next_free != root.nodeCount())
+        @compileError("node count does not match the breadth-first seed layout");
 
     return seed;
 }
@@ -382,47 +362,44 @@ const Health = struct {
     value: u32,
 };
 
-test "filter types report collapsed node counts" {
-    try expectEqual(1, With(Position).node_cnt);
-    try expectEqual(1, Without(Position).node_cnt);
+test "filter descriptions collapse single children and normalize root tuples" {
+    try expectEqual(1, With(Position).nodeCount());
+    try expectEqual(1, Without(Position).nodeCount());
 
     // Single-element tuples collapse to the element itself.
-    try expectEqual(1, With(.{Position}).node_cnt);
-    try expectEqual(1, Without(.{Position}).node_cnt);
-    try expectEqual(1, All(.{With(Position)}).node_cnt);
-    try expectEqual(1, Any(.{With(Position)}).node_cnt);
+    try expectEqual(1, With(.{Position}).nodeCount());
+    try expectEqual(1, Without(.{Position}).nodeCount());
+    try expectEqual(1, All(.{With(Position)}).nodeCount());
+    try expectEqual(1, Any(.{With(Position)}).nodeCount());
 
-    const WithBoth = With(.{ Position, Velocity });
-    try expect(WithBoth.kind == .all);
-    try expectEqual(2, WithBoth.child_cnt);
-    try expectEqual(3, WithBoth.node_cnt);
+    const with_both = With(.{ Position, Velocity });
+    try expect(with_both.branch.kind == .all);
+    try expectEqual(2, with_both.branch.children.len);
+    try expectEqual(3, with_both.nodeCount());
 
-    const WithoutBoth = Without(.{ Position, Velocity });
-    try expect(WithoutBoth.kind == .all);
-    try expectEqual(3, WithoutBoth.node_cnt);
+    const without_both = Without(.{ Position, Velocity });
+    try expect(without_both.branch.kind == .all);
+    try expectEqual(3, without_both.nodeCount());
+    try expect(!without_both.branch.children[0].leaf.require);
+    try expect(!without_both.branch.children[1].leaf.require);
 
-    try expectEqual(3, All(.{ With(Position), Without(Velocity) }).node_cnt);
-    try expectEqual(3, Any(.{ With(Position), Without(Velocity) }).node_cnt);
+    try expectEqual(3, All(.{ With(Position), Without(Velocity) }).nodeCount());
+    try expectEqual(3, Any(.{ With(Position), Without(Velocity) }).nodeCount());
 
     // Empty branches stay as one node so they can be addressed by a parent span.
-    try expectEqual(1, All(.{}).node_cnt);
-    try expectEqual(0, All(.{}).child_cnt);
-    try expectEqual(1, Any(.{}).node_cnt);
-    try expectEqual(0, Any(.{}).child_cnt);
+    try expectEqual(1, All(.{}).nodeCount());
+    try expectEqual(0, All(.{}).branch.children.len);
+    try expectEqual(1, Any(.{}).nodeCount());
+    try expectEqual(0, Any(.{}).branch.children.len);
+    const single = comptime normalizeRoot(.{With(Position)}).?;
+    try expect(single.leaf.component == Position);
+    try expect(single.leaf.require);
 
-    try expectEqual(0, Empty.node_cnt);
-}
+    const pair = comptime normalizeRoot(.{ With(Position), Without(Velocity) }).?;
+    try expect(pair.branch.kind == .all);
+    try expectEqual(3, pair.nodeCount());
 
-test "root tuples collapse and expand" {
-    const Single = NormalizeRoot(.{With(Position)});
-    try expect(Single == With(Position));
-
-    const Pair = NormalizeRoot(.{ With(Position), Without(Velocity) });
-    try expect(Pair.kind == .all);
-    try expectEqual(3, Pair.node_cnt);
-
-    const None = NormalizeRoot(.{});
-    try expect(None == Empty);
+    try expect(comptime normalizeRoot(.{}) == null);
 }
 
 test "init fills breadth-first spans and leaves" {
@@ -432,11 +409,11 @@ test "init fills breadth-first spans and leaves" {
 
     const position = try registry.register(Position);
     const velocity = try registry.register(Velocity);
-    const frozen = try registry.register(Frozen);
+    const health = try registry.register(Health);
 
     var filter = try init(allocator, &registry, .{
         With(Position),
-        Any(.{ Without(Velocity), With(Frozen) }),
+        Any(.{ Without(Velocity), With(Health) }),
     });
     defer filter.deinit(allocator);
 
@@ -450,7 +427,7 @@ test "init fills breadth-first spans and leaves" {
     const first = filter.nodes[1].leaf;
     try expectEqual(position, first.comp_id);
     try expectEqual(Storage.archetype, first.storage);
-    try expect(first.vtable == &With(Position).vtable);
+    try expect(first.require);
 
     const rest = filter.nodes[2].branch;
     try expect(rest.kind == .any);
@@ -459,8 +436,11 @@ test "init fills breadth-first spans and leaves" {
 
     const second = filter.nodes[3].leaf;
     try expectEqual(velocity, second.comp_id);
-    try expect(second.vtable == &Without(Velocity).vtable);
-    try expectEqual(frozen, filter.nodes[4].leaf.comp_id);
+    try expect(!second.require);
+    const third = filter.nodes[4].leaf;
+    try expectEqual(health, third.comp_id);
+    try expectEqual(Storage.sparse_set, third.storage);
+    try expect(third.require);
 
     // Every branch span must stay inside the array and cover its direct children.
     for (filter.nodes, 0..) |node, i| {
@@ -473,32 +453,6 @@ test "init fills breadth-first spans and leaves" {
             },
         }
     }
-}
-
-test "empty root owns no nodes" {
-    const allocator = std.testing.allocator;
-    var registry = CompReg.init(allocator);
-    defer registry.deinit();
-
-    var filter = try init(allocator, &registry, .{});
-    defer filter.deinit(allocator);
-
-    try expectEqual(0, filter.nodes.len);
-}
-
-test "leaf nodes snapshot component storage" {
-    const allocator = std.testing.allocator;
-    var registry = CompReg.init(allocator);
-    defer registry.deinit();
-
-    const health = try registry.register(Health);
-
-    var filter = try init(allocator, &registry, With(Health));
-    defer filter.deinit(allocator);
-
-    try expectEqual(1, filter.nodes.len);
-    try expectEqual(health, filter.nodes[0].leaf.comp_id);
-    try expectEqual(Storage.sparse_set, filter.nodes[0].leaf.storage);
 }
 
 test "judgeArchetype combines leaf and branch decisions" {
@@ -529,11 +483,21 @@ test "judgeArchetype combines leaf and branch decisions" {
     var unmentioned = Signature.init(allocator);
     defer unmentioned.deinit(allocator);
 
-    {
-        var filter = try init(allocator, &registry, With(Position));
+    inline for (.{ With(Position), Without(Position) }) |spec| {
+        var filter = try init(allocator, &registry, spec);
         defer filter.deinit(allocator);
-        try expect(filter.judgeArchetype(only_position) == .accept);
-        try expect(filter.judgeArchetype(only_velocity) == .reject);
+        const require = spec.leaf.require;
+        try expectEqual(
+            if (require) Decision.accept else Decision.reject,
+            filter.judgeArchetype(only_position),
+        );
+        try expectEqual(
+            if (require) Decision.reject else Decision.accept,
+            filter.judgeArchetype(only_velocity),
+        );
+        // Archetype-stored leaves are already decided before the entity phase.
+        try expect(filter.nodes[0].leaf.judgeEntity(only_position));
+        try expect(filter.nodes[0].leaf.judgeEntity(only_velocity));
     }
 
     {
@@ -580,20 +544,16 @@ test "judgeEntity checks sparse components on undecided archetypes" {
     defer position_only.deinit(allocator);
     try position_only.add(allocator, &.{position});
 
-    {
-        var filter = try init(allocator, &registry, With(Health));
+    inline for (.{ With(Health), Without(Health) }) |spec| {
+        var filter = try init(allocator, &registry, spec);
         defer filter.deinit(allocator);
-        try expect(filter.judgeArchetype(position_only) == .per_entity);
-        try expect(filter.judgeEntity(position_health));
-        try expect(!filter.judgeEntity(position_only));
-    }
-
-    {
-        var filter = try init(allocator, &registry, Without(Health));
-        defer filter.deinit(allocator);
-        try expect(filter.judgeArchetype(position_only) == .per_entity);
-        try expect(!filter.judgeEntity(position_health));
-        try expect(filter.judgeEntity(position_only));
+        try expectEqual(1, filter.nodes.len);
+        try expectEqual(health, filter.nodes[0].leaf.comp_id);
+        try expectEqual(Storage.sparse_set, filter.nodes[0].leaf.storage);
+        try expectEqual(Decision.per_entity, filter.judgeArchetype(position_only));
+        try expectEqual(Decision.per_entity, filter.judgeArchetype(position_health));
+        try expectEqual(spec.leaf.require, filter.judgeEntity(position_health));
+        try expectEqual(!spec.leaf.require, filter.judgeEntity(position_only));
     }
 
     {
@@ -621,17 +581,45 @@ test "judgeEntity checks sparse components on undecided archetypes" {
     }
 }
 
-test "empty filter matches every archetype and entity" {
+test "empty roots and branches preserve logical identities" {
     const allocator = std.testing.allocator;
     var registry = CompReg.init(allocator);
     defer registry.deinit();
+    const position = try registry.register(Position);
 
-    var sig = Signature.init(allocator);
-    defer sig.deinit(allocator);
+    var absent = Signature.init(allocator);
+    defer absent.deinit(allocator);
+    var present = Signature.init(allocator);
+    defer present.deinit(allocator);
+    try present.add(allocator, &.{position});
 
-    var filter = try init(allocator, &registry, .{});
+    {
+        var filter = try init(allocator, &registry, .{});
+        defer filter.deinit(allocator);
+        try expectEqual(0, filter.nodes.len);
+        try expectEqual(Decision.accept, filter.judgeArchetype(absent));
+        try expectEqual(Decision.accept, filter.judgeArchetype(present));
+        try expect(filter.judgeEntity(absent));
+        try expect(filter.judgeEntity(present));
+    }
+
+    inline for (.{ All(.{}), Any(.{}), With(.{}), Without(.{}) }) |spec| {
+        var filter = try init(allocator, &registry, spec);
+        defer filter.deinit(allocator);
+        try expectEqual(1, filter.nodes.len);
+        const branch = filter.nodes[0].branch;
+        try expectEqual(branch.child_span.start, branch.child_span.end);
+        const expected: Decision = if (branch.kind == .all) .accept else .reject;
+        try expectEqual(expected, filter.judgeArchetype(absent));
+        try expectEqual(expected, filter.judgeArchetype(present));
+    }
+
+    var filter = try init(allocator, &registry, All(.{
+        All(.{}),
+        Any(.{ Any(.{}), With(Position) }),
+    }));
     defer filter.deinit(allocator);
-
-    try expect(filter.judgeArchetype(sig) == .accept);
-    try expect(filter.judgeEntity(sig));
+    try expectEqual(5, filter.nodes.len);
+    try expectEqual(Decision.reject, filter.judgeArchetype(absent));
+    try expectEqual(Decision.accept, filter.judgeArchetype(present));
 }
