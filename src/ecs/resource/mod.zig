@@ -5,6 +5,7 @@
 
 const engine = @import("engine");
 const World = engine.ecs.World;
+const Access = engine.ecs.system.Access;
 
 pub const Id = engine.ecs.Id;
 pub const Registry = @import("Registry.zig");
@@ -50,6 +51,10 @@ fn ResourceParam(comptime T: type, comptime mutable: bool) type {
     return struct {
         ptr: if (mutable) *T else *const T,
 
+        pub const access: Access.Spec = .{ .shared = .{ .entries = &.{
+            .{ .domain = .resource, .target = T, .mode = if (mutable) .write else .read },
+        } } };
+
         /// Caches the resource ID so runs skip the type-to-ID hash lookup.
         pub const Context = struct {
             world: *World,
@@ -84,6 +89,18 @@ test "resource parameters cache their id and borrow shared storage" {
         pub const se_resource: Mark = .{};
         value: u32,
     };
+    inline for (
+        .{ Res(Counter), ResMut(Counter) },
+        [_]Access.Mode{ .read, .write },
+    ) |P, mode| {
+        const spec = comptime param.access(P);
+        try testing.expectEqual(1, spec.shared.entries.len);
+        const entry = spec.shared.entries[0];
+        try testing.expectEqual(Access.Domain.resource, entry.domain);
+        try testing.expect(entry.target == Counter);
+        try testing.expectEqual(mode, entry.mode);
+    }
+
     var world = World.init(testing.allocator, testing.io);
     defer world.deinit();
     const id = try world.insertResource(Counter{ .value = 1 });

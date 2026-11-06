@@ -70,8 +70,11 @@ pub const Group = union(enum) {
 
 /// One parameter's declaration. Missing declarations should resolve to `exclusive`.
 pub const Spec = union(enum) {
+    /// No access.
     none,
+    /// Exclusive access to the world, including all components and resources.
     exclusive,
+    /// Shared access to the world, but listed entries may conflict with other parameters.
     shared: struct {
         entries: []const Entry.Spec = &.{},
         /// Full query condition, including component requirements implied by its Item.

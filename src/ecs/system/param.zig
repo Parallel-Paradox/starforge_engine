@@ -1,15 +1,17 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 const engine = @import("engine");
 const World = engine.ecs.World;
 const query = engine.ecs.query;
+const Access = engine.ecs.system.Access;
 
 /// The storage a parameter keeps between extractions; `World` when it needs
 /// none, including for parameters that are not declarations-bearing types.
 ///
-/// A parameter that declares `Context` must also declare `init(*World)`,
-/// returning that context type, so the system can build it.
+/// A parameter's declared `Context` must provide `init(*World)` returning itself.
 pub fn Context(comptime P: type) type {
+    if (P == Allocator or P == std.Io) return World;
     switch (@typeInfo(P)) {
         .@"struct", .@"union", .@"enum", .@"opaque" => {
             if (@hasDecl(P, "Context")) {
@@ -51,11 +53,11 @@ fn assertContext(comptime C: type) void {
 
 /// Asserts that `P` is a valid system parameter.
 ///
-/// `*World` is accepted directly. Every other parameter must provide
-/// `extract`, and a parameter declaring `Context` must also satisfy
-/// `assertContext`.
+/// `*World`, `Allocator`, and `Io` are accepted directly. Other parameters must
+/// provide `extract`. Declared contexts must satisfy `assertContext`, and access
+/// declarations must have type `Access.Spec`.
 pub fn assertParam(comptime P: type) void {
-    if (P == *World) return;
+    if (P == *World or P == Allocator or P == std.Io) return;
 
     const has_extract = switch (@typeInfo(P)) {
         .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(P, "extract"),
@@ -63,21 +65,41 @@ pub fn assertParam(comptime P: type) void {
     };
     if (!has_extract) {
         @compileError(@typeName(P) ++ " is not a system parameter; " ++
-            "expected *World or a type declaring `extract`");
+            "expected *World, Allocator, Io, or a type declaring `extract`");
     }
 
     if (@hasDecl(P, "Context")) assertContext(P.Context);
+    if (@hasDecl(P, "access")) {
+        if (@TypeOf(P.access) != Access.Spec) {
+            @compileError(@typeName(P) ++ ".access must have type Access.Spec");
+        }
+    }
+}
+
+/// Returns a parameter's comptime access declaration without extracting it.
+/// Missing declarations are exclusive; `.none` must be declared explicitly.
+pub fn access(comptime P: type) Access.Spec {
+    assertParam(P);
+    if (P == *World) return .exclusive;
+    if (P == Allocator or P == std.Io) return .none;
+    if (@hasDecl(P, "access")) return P.access;
+    return .exclusive;
 }
 
 /// Extracts a parameter of type `P` from its context `ctx`.
+/// Allocator and Io are copied from the World. Parallel execution requires both
+/// implementations to support concurrent use; caller-owned data is not synchronized.
 pub fn extractParam(comptime P: type, ctx: *Context(P)) !P {
     if (P == *World) return ctx;
+    if (P == Allocator) return ctx.allocator;
+    if (P == std.Io) return ctx.io;
     return P.extract(ctx);
 }
 
-test "Context is World for parameters without one" {
-    try std.testing.expect(Context(*World) == World);
-    try std.testing.expect(Context(struct {}) == World);
+test "Context is World for builtins and parameters without one" {
+    inline for (.{ *World, Allocator, std.Io, struct {} }) |P| {
+        try std.testing.expect(Context(P) == World);
+    }
 }
 
 test "query contexts satisfy the Context contract" {
@@ -99,18 +121,72 @@ test "Context returns a declared context built by init" {
     try std.testing.expect(Context(Good) == Good.Context);
 }
 
-test "assertParam accepts system parameters" {
+test "access validates declarations and defaults undeclared parameters to exclusive" {
     const Q = query.Query(struct { engine.ecs.entity.Id });
     const Extract = struct {
         pub fn extract(_: *World) error{}!@This() {
             return .{};
         }
     };
+    const Local = struct {
+        pub const access: Access.Spec = .none;
 
-    assertParam(*World);
-    assertParam(Q);
-    assertParam(Extract);
+        pub fn extract(_: *World) error{}!@This() {
+            return .{};
+        }
+    };
+    const Declared = struct {
+        pub const access: Access.Spec = .{ .shared = .{ .entries = &.{
+            .{ .domain = .resource, .target = u32, .mode = .write },
+        } } };
 
-    // A scalar is not a system parameter:
+        pub fn extract(_: *World) error{}!@This() {
+            @panic("reading access must not extract the parameter");
+        }
+    };
+
+    inline for (.{ *World, Q, Extract }) |P| {
+        try std.testing.expect(access(P) == .exclusive);
+    }
+    inline for (.{ Allocator, std.Io, Local }) |P| {
+        try std.testing.expect(access(P) == .none);
+    }
+    const declared = comptime access(Declared);
+    try std.testing.expectEqual(1, declared.shared.entries.len);
+    const entry = declared.shared.entries[0];
+    try std.testing.expectEqual(Access.Domain.resource, entry.domain);
+    try std.testing.expect(entry.target == u32);
+    try std.testing.expectEqual(Access.Mode.write, entry.mode);
+
+    // Compile errors: invalid parameter or incorrectly typed access declaration.
     // assertParam(u32);
+    // const Wrong = struct {
+    //     pub const access = .none;
+    //     pub const extract = Extract.extract;
+    // };
+    // assertParam(Wrong);
+}
+
+test "builtins borrow the World and inject allocator and Io by value" {
+    var world = World.init(std.testing.allocator, std.testing.io);
+    defer world.deinit();
+
+    try std.testing.expect(try extractParam(*World, &world) == &world);
+    const allocator = try extractParam(Allocator, &world);
+    const io = try extractParam(std.Io, &world);
+    try std.testing.expectEqual(world.allocator, allocator);
+    try std.testing.expectEqual(world.io, io);
+
+    const Run = struct {
+        fn run(injected_allocator: Allocator, injected_io: std.Io) !void {
+            try std.testing.expectEqual(std.testing.allocator, injected_allocator);
+            try std.testing.expectEqual(std.testing.io, injected_io);
+            const bytes = try injected_allocator.alloc(u8, 16);
+            defer injected_allocator.free(bytes);
+            injected_io.random(bytes);
+        }
+    };
+    var system = try engine.ecs.system.System.Builder(Run.run).build(&world);
+    defer system.deinit(&world);
+    try system.run(&world);
 }
