@@ -16,7 +16,7 @@ pub const Mode = enum {
     read,
     write,
 
-    pub fn conflicts(self: Mode, other: Mode) bool {
+    pub fn isConflict(self: Mode, other: Mode) bool {
         return self == .write or other == .write;
     }
 };
@@ -31,15 +31,15 @@ pub const Entry = struct {
         target: type,
         mode: Mode,
 
-        pub fn conflicts(comptime self: @This(), comptime other: @This()) bool {
+        pub fn isConflict(comptime self: @This(), comptime other: @This()) bool {
             return self.domain == other.domain and self.target == other.target and
-                self.mode.conflicts(other.mode);
+                self.mode.isConflict(other.mode);
         }
     };
 
-    pub fn conflicts(self: Entry, other: Entry) bool {
+    pub fn isConflict(self: Entry, other: Entry) bool {
         return self.domain == other.domain and self.type_id.eql(other.type_id) and
-            self.mode.conflicts(other.mode);
+            self.mode.isConflict(other.mode);
     }
 };
 
@@ -57,22 +57,22 @@ pub const Group = union(enum) {
         filter: ?Condition = null,
     },
 
-    pub fn conflicts(self: Group, other: Group) bool {
+    pub fn isConflict(self: Group, other: Group) bool {
         return switch (self) {
             .none => false,
             .exclusive => other != .none,
             .shared => |a| switch (other) {
                 .none => false,
                 .exclusive => true,
-                .shared => |b| entriesConflict(a.entries, b.entries),
+                .shared => |b| isEntriesConflict(a.entries, b.entries),
             },
         };
     }
 
-    fn entriesConflict(a: []const Entry, b: []const Entry) bool {
+    fn isEntriesConflict(a: []const Entry, b: []const Entry) bool {
         for (a) |lhs| {
             for (b) |rhs| {
-                if (lhs.conflicts(rhs)) return true;
+                if (lhs.isConflict(rhs)) return true;
             }
         }
         return false;
@@ -119,19 +119,19 @@ pub const Spec = union(enum) {
         filter: ?Filter.Node.Spec = null,
     },
 
-    pub fn conflicts(comptime self: Spec, comptime other: Spec) bool {
-        return comptime self.overlap(other) != null;
+    pub fn isConflict(comptime self: Spec, comptime other: Spec) bool {
+        return comptime self.findConflict(other) != null;
     }
 
-    fn overlap(comptime self: Spec, comptime other: Spec) ?struct { ?usize, ?usize } {
+    fn findConflict(comptime self: Spec, comptime other: Spec) ?struct { ?usize, ?usize } {
         return comptime switch (self) {
             .none => null,
             .exclusive => if (other == .none) null else .{ null, null },
-            .shared => |a| sharedOverlap(a.entries, other),
+            .shared => |a| findSharedConflict(a.entries, other),
         };
     }
 
-    fn sharedOverlap(
+    fn findSharedConflict(
         comptime entries: []const Entry.Spec,
         comptime other: Spec,
     ) ?struct { ?usize, ?usize } {
@@ -139,26 +139,23 @@ pub const Spec = union(enum) {
         if (other == .exclusive) return .{ null, null };
         for (entries, 0..) |lhs, i| {
             for (other.shared.entries, 0..) |rhs, j| {
-                if (lhs.conflicts(rhs)) return .{ i, j };
+                if (lhs.isConflict(rhs)) return .{ i, j };
             }
         }
         return null;
     }
 };
 
-/// Locations in the original parameter groups, before any read-access deduplication.
-pub const Conflict = struct {
-    first: Location,
-    second: Location,
-
-    pub const Location = struct {
-        param: usize,
-        /// Null for group-level exclusive conflicts, which need no payload entry.
-        entry: ?usize = null,
-    };
+pub const Location = struct {
+    param: usize,
+    /// Null for group-level exclusive conflicts, which need no payload entry.
+    entry: ?usize = null,
 };
 
-/// Finds an invalid overlap within or between parameter declarations.
+/// Locations in the original parameter groups, before any read-access deduplication.
+pub const Conflict = struct { Location, Location };
+
+/// Finds a conflict within or between parameter declarations.
 /// Returning locations instead of emitting a compile error lets callers add type names.
 pub fn findConflict(comptime specs: []const Spec) ?Conflict {
     return comptime blk: {
@@ -167,17 +164,17 @@ pub fn findConflict(comptime specs: []const Spec) ?Conflict {
                 const entries = spec.shared.entries;
                 for (entries, 0..) |lhs, a| {
                     for (entries[a + 1 ..], a + 1..) |rhs, b| {
-                        if (lhs.conflicts(rhs)) break :blk .{
-                            .first = .{ .param = i, .entry = a },
-                            .second = .{ .param = i, .entry = b },
+                        if (lhs.isConflict(rhs)) break :blk .{
+                            .{ .param = i, .entry = a },
+                            .{ .param = i, .entry = b },
                         };
                     }
                 }
             }
             for (specs[i + 1 ..], i + 1..) |other, j| {
-                if (spec.overlap(other)) |pair| break :blk .{
-                    .first = .{ .param = i, .entry = pair[0] },
-                    .second = .{ .param = j, .entry = pair[1] },
+                if (spec.findConflict(other)) |pair| break :blk .{
+                    .{ .param = i, .entry = pair[0] },
+                    .{ .param = j, .entry = pair[1] },
                 };
             }
         }
@@ -253,10 +250,10 @@ pub fn Storage(comptime specs: []const Spec) type {
 
 /// Conservative pairwise check. Entries borrow caller-owned storage with cached, valid TypeIds.
 /// Does not allocate, look up registry ids, or inspect query matching conditions.
-pub fn conflicts(self: Access, other: Access) bool {
+pub fn isConflict(self: Access, other: Access) bool {
     for (self.groups) |a| {
         for (other.groups) |b| {
-            if (a.conflicts(b)) return true;
+            if (a.isConflict(b)) return true;
         }
     }
     return false;
@@ -310,18 +307,18 @@ test "declared and runtime conflicts agree on access modes domains and scopes" {
         const lhs = a.init();
         const rhs = b.init();
         try expect(lhs.groups.ptr != rhs.groups.ptr);
-        try expectEqual(case.conflict, case.a.conflicts(case.b));
-        try expectEqual(case.conflict, case.b.conflicts(case.a));
-        try expectEqual(case.conflict, lhs.conflicts(rhs));
-        try expectEqual(case.conflict, rhs.conflicts(lhs));
+        try expectEqual(case.conflict, case.a.isConflict(case.b));
+        try expectEqual(case.conflict, case.b.isConflict(case.a));
+        try expectEqual(case.conflict, lhs.isConflict(rhs));
+        try expectEqual(case.conflict, rhs.isConflict(lhs));
     }
     var storage: Storage(&.{}) = undefined;
     const view = storage.init();
     const exclusive: Access = .{ .groups = &.{.exclusive} };
     try expectEqual(0, @sizeOf(@TypeOf(storage)));
     try expectEqual(0, view.groups.len);
-    try expect(!view.conflicts(exclusive));
-    try expect(!exclusive.conflicts(view));
+    try expect(!view.isConflict(exclusive));
+    try expect(!exclusive.isConflict(view));
 }
 
 test "findConflict reports original parameter and entry locations" {
@@ -333,8 +330,8 @@ test "findConflict reports original parameter and entry locations" {
     }));
 
     try expectEqualDeep(@as(?Conflict, .{
-        .first = .{ .param = 1, .entry = 1 },
-        .second = .{ .param = 1, .entry = 2 },
+        .{ .param = 1, .entry = 1 },
+        .{ .param = 1, .entry = 2 },
     }), comptime findConflict(&.{
         .none,
         .{ .shared = .{ .entries = &.{
@@ -344,12 +341,12 @@ test "findConflict reports original parameter and entry locations" {
         } } },
     }));
     try expectEqualDeep(@as(?Conflict, .{
-        .first = .{ .param = 1, .entry = 0 },
-        .second = .{ .param = 2, .entry = 0 },
+        .{ .param = 1, .entry = 0 },
+        .{ .param = 2, .entry = 0 },
     }), comptime findConflict(&.{ .none, read_spec, write_spec }));
     try expectEqualDeep(@as(?Conflict, .{
-        .first = .{ .param = 0 },
-        .second = .{ .param = 2 },
+        .{ .param = 0 },
+        .{ .param = 2 },
     }), comptime findConflict(&.{ .exclusive, .none, .{ .shared = .{} } }));
 }
 

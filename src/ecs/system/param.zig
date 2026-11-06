@@ -113,7 +113,7 @@ test "query contexts satisfy the Context contract" {
     try expect(spec.shared.filter.?.branch.kind == .all);
     try expectEqual(0, spec.shared.filter.?.branch.children.len);
     const exclusive: Access.Spec = .exclusive;
-    try expect(spec.conflicts(exclusive));
+    try expect(spec.isConflict(exclusive));
 }
 
 test "Context returns a declared context built by init" {

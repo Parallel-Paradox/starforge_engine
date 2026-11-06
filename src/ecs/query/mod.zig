@@ -88,8 +88,8 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
     } };
     comptime {
         if (Access.findConflict(&.{access_spec})) |conflict| {
-            const a = conflict.first.entry.?;
-            const b = conflict.second.entry.?;
+            const a = conflict[0].entry.?;
+            const b = conflict[1].entry.?;
             @compileError(std.fmt.comptimePrint(
                 "Query target fields `{s}` and `{s}` have conflicting access to {s}",
                 .{ metadata.names[a], metadata.names[b], @typeName(entries[a].target) },
