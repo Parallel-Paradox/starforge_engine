@@ -203,7 +203,8 @@ pub fn init(
     return self;
 }
 
-fn normalizeRoot(comptime filter: anytype) ?Node.Spec {
+/// Normalizes a description or root tuple; an empty tuple has no root.
+pub fn normalizeRoot(comptime filter: anytype) ?Node.Spec {
     if (@TypeOf(filter) == Node.Spec) return filter;
     switch (@typeInfo(@TypeOf(filter))) {
         .@"struct" => |info| if (info.is_tuple) {

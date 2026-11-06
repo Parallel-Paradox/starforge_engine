@@ -43,9 +43,14 @@ pub const Entry = struct {
     }
 };
 
+/// Runtime access for one parameter, using cached type identities.
 pub const Group = union(enum) {
+    /// No access.
     none,
+    /// Exclusive access to the world, including all components and resources.
     exclusive,
+    /// Shared access to the world, but listed entries may conflict with other parameters.
+    /// An empty group still reads world structure and conflicts with exclusive access.
     shared: struct { entries: []const Entry = &.{} },
 
     pub fn conflicts(self: Group, other: Group) bool {

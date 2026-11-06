@@ -96,15 +96,24 @@ pub fn extractParam(comptime P: type, ctx: *Context(P)) !P {
     return P.extract(ctx);
 }
 
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+
 test "Context is World for builtins and parameters without one" {
     inline for (.{ *World, Allocator, std.Io, struct {} }) |P| {
-        try std.testing.expect(Context(P) == World);
+        try expect(Context(P) == World);
     }
 }
 
 test "query contexts satisfy the Context contract" {
     const Q = query.Query(struct { engine.ecs.entity.Id });
-    try std.testing.expect(Context(Q) == query.State);
+    try expect(Context(Q) == query.State);
+    const spec = comptime access(Q);
+    try expectEqual(0, spec.shared.entries.len);
+    try expect(spec.shared.filter.?.branch.kind == .all);
+    try expectEqual(0, spec.shared.filter.?.branch.children.len);
+    const exclusive: Access.Spec = .exclusive;
+    try expect(spec.conflicts(exclusive));
 }
 
 test "Context returns a declared context built by init" {
@@ -118,11 +127,10 @@ test "Context returns a declared context built by init" {
         };
     };
 
-    try std.testing.expect(Context(Good) == Good.Context);
+    try expect(Context(Good) == Good.Context);
 }
 
 test "access validates declarations and defaults undeclared parameters to exclusive" {
-    const Q = query.Query(struct { engine.ecs.entity.Id });
     const Extract = struct {
         pub fn extract(_: *World) error{}!@This() {
             return .{};
@@ -145,18 +153,18 @@ test "access validates declarations and defaults undeclared parameters to exclus
         }
     };
 
-    inline for (.{ *World, Q, Extract }) |P| {
-        try std.testing.expect(access(P) == .exclusive);
+    inline for (.{ *World, Extract }) |P| {
+        try expect(access(P) == .exclusive);
     }
     inline for (.{ Allocator, std.Io, Local }) |P| {
-        try std.testing.expect(access(P) == .none);
+        try expect(access(P) == .none);
     }
     const declared = comptime access(Declared);
-    try std.testing.expectEqual(1, declared.shared.entries.len);
+    try expectEqual(1, declared.shared.entries.len);
     const entry = declared.shared.entries[0];
-    try std.testing.expectEqual(Access.Domain.resource, entry.domain);
-    try std.testing.expect(entry.target == u32);
-    try std.testing.expectEqual(Access.Mode.write, entry.mode);
+    try expectEqual(Access.Domain.resource, entry.domain);
+    try expect(entry.target == u32);
+    try expectEqual(Access.Mode.write, entry.mode);
 
     // Compile errors: invalid parameter or incorrectly typed access declaration.
     // assertParam(u32);
@@ -171,16 +179,16 @@ test "builtins borrow the World and inject allocator and Io by value" {
     var world = World.init(std.testing.allocator, std.testing.io);
     defer world.deinit();
 
-    try std.testing.expect(try extractParam(*World, &world) == &world);
+    try expect(try extractParam(*World, &world) == &world);
     const allocator = try extractParam(Allocator, &world);
     const io = try extractParam(std.Io, &world);
-    try std.testing.expectEqual(world.allocator, allocator);
-    try std.testing.expectEqual(world.io, io);
+    try expectEqual(world.allocator, allocator);
+    try expectEqual(world.io, io);
 
     const Run = struct {
         fn run(injected_allocator: Allocator, injected_io: std.Io) !void {
-            try std.testing.expectEqual(std.testing.allocator, injected_allocator);
-            try std.testing.expectEqual(std.testing.io, injected_io);
+            try expectEqual(std.testing.allocator, injected_allocator);
+            try expectEqual(std.testing.io, injected_io);
             const bytes = try injected_allocator.alloc(u8, 16);
             defer injected_allocator.free(bytes);
             injected_io.random(bytes);

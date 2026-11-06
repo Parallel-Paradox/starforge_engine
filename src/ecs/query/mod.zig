@@ -1,31 +1,11 @@
-//! Queries: typed iteration over entities matching a component layout and filters.
+//! Typed queries over entities and their components.
 //!
-//! `Query(Item)` yields one item per entity holding every component in `Item`.
-//! `QueryF(Item, filters)` narrows the result with `Filter` operators.
+//! `Query(Item)` selects entities containing every component in `Item`;
+//! `QueryF(Item, filters)` adds component-presence filters.
+//! `Item` is a struct or tuple of `*T`, `*const T`, and `EntityId` fields.
 //!
-//! `Item` is a struct or tuple of `*T`, `*const T`, or `EntityId` fields.
-//! Tuples are yielded as tuples and destructured by the caller:
-//!
-//! ```zig
-//! const Moving = Query(struct { EntityId, *const Position, *Velocity });
-//! var ctx = Moving.Context.init(&world);
-//! defer ctx.deinit();
-//!
-//! var query = try Moving.extract(&ctx);
-//! while (query.next()) |item| {
-//!     const id, const position, const velocity = item;
-//!     velocity.dx = position.x;
-//! }
-//! ```
-//!
-//! A query iterates its cached archetypes through an `Iter`: `next` reads the
-//! current entity and advances. The archetype cache lives in the parameter
-//! `Context`, which the system owns; `extract` builds it on first use and
-//! refreshes it on every call, starting a new iteration.
-//!
-//! Filters are evaluated per archetype, then per entity when undecided. Every target
-//! component is implicitly required. Items point into component storage and are
-//! invalidated by structural changes that grow or move it.
+//! Queries declare component read/write access and reject overlapping fields
+//! involving a write. Returned pointers may be invalidated by structural changes.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -38,6 +18,7 @@ const entity = ecs.entity;
 const EntityId = entity.Id;
 const ArchetypeId = entity.archetype.Id;
 const TypeId = engine.reflect.TypeId;
+const Access = ecs.system.Access;
 
 pub const Filter = @import("Filter.zig");
 pub const State = @import("State.zig");
@@ -51,7 +32,7 @@ pub fn Query(comptime I: type) type {
 
 /// A query over entities holding every component in `Item`, narrowed by `filters`.
 ///
-/// `filters` is a tuple of filter types, for example `.{With(Frozen)}`.
+/// `filters` is a filter description or tuple of descriptions, e.g. `.{With(Frozen)}`.
 /// The `Context` owns the cached archetypes; call `extract` at the start of every
 /// run to refresh them and start a new iteration.
 pub fn QueryF(comptime I: type, comptime filters: anytype) type {
@@ -70,8 +51,55 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
         break :blk types;
     };
 
+    const user_filter = comptime Filter.normalizeRoot(filters);
+    const comp_count = comptime blk: {
+        var total: usize = 0;
+        for (comp_types) |T| {
+            if (T != null) total += 1;
+        }
+        break :blk total;
+    };
+    const metadata = comptime blk: {
+        var entries: [comp_count]Access.Entry.Spec = undefined;
+        const cond_count = comp_count + @intFromBool(user_filter != null);
+        var conditions: [cond_count]Filter.Node.Spec = undefined;
+        var names: [comp_count][]const u8 = undefined;
+        var next: usize = 0;
+        for (comp_types, field_types, field_names) |maybe, F, name| {
+            if (maybe) |T| {
+                entries[next] = .{
+                    .domain = .component,
+                    .target = T,
+                    .mode = if (@typeInfo(F).pointer.attrs.@"const") .read else .write,
+                };
+                conditions[next] = Filter.With(T);
+                names[next] = name;
+                next += 1;
+            }
+        }
+        if (user_filter) |filter| conditions[comp_count] = filter;
+        break :blk .{ .entries = entries, .conditions = conditions, .names = names };
+    };
+    const entries = metadata.entries;
+    const conditions = metadata.conditions;
+    const access_spec: Access.Spec = .{ .shared = .{
+        .entries = &entries,
+        .filter = Filter.Branch.spec(.all, &conditions),
+    } };
+    comptime {
+        if (Access.findConflict(&.{access_spec})) |conflict| {
+            const a = conflict.first.entry.?;
+            const b = conflict.second.entry.?;
+            @compileError(std.fmt.comptimePrint(
+                "Query target fields `{s}` and `{s}` have conflicting access to {s}",
+                .{ metadata.names[a], metadata.names[b], @typeName(entries[a].target) },
+            ));
+        }
+    }
+
     return struct {
         pub const Item = I;
+        pub const access: Access.Spec = access_spec;
 
         /// Cached archetypes owned by the system and shared by every iteration
         /// extracted from it.
@@ -257,6 +285,17 @@ test "queries yield target fields and write through pointers" {
 
     // Mutable targets write into component storage.
     const Mutable = Query(struct { pos: *const Position, vel: *Velocity });
+    const Tuple = Query(struct { EntityId, *const Position, *const Velocity });
+    inline for (.{ Mutable, Tuple }) |Q| {
+        const spec = comptime ecs.system.param.access(Q);
+        try expectEqual(2, spec.shared.entries.len);
+        inline for (spec.shared.entries, .{ Position, Velocity }, 0..) |entry, T, i| {
+            try expectEqual(Access.Domain.component, entry.domain);
+            try expect(entry.target == T);
+            const mode: Access.Mode = if (Q == Mutable and i == 1) .write else .read;
+            try expectEqual(mode, entry.mode);
+        }
+    }
     var mutable_ctx = Mutable.Context.init(&world);
     defer mutable_ctx.deinit();
     var mutable = try Mutable.extract(&mutable_ctx);
@@ -268,7 +307,6 @@ test "queries yield target fields and write through pointers" {
     try expect(mutable.next() == null);
 
     // A tuple target yields the fields in declaration order.
-    const Tuple = Query(struct { EntityId, *const Position, *const Velocity });
     var tuple_ctx = Tuple.Context.init(&world);
     defer tuple_ctx.deinit();
     var tuple = try Tuple.extract(&tuple_ctx);
@@ -279,6 +317,16 @@ test "queries yield target fields and write through pointers" {
     try expectEqual(30, velocity.dx);
     try expectEqual(40, velocity.dy);
     try expect(tuple.next() == null);
+
+    // Duplicate reads and EntityIds may alias, but never grant mutable access.
+    const Shared = Query(struct { EntityId, *const Position, EntityId, *const Position });
+    var shared_ctx = Shared.Context.init(&world);
+    defer shared_ctx.deinit();
+    var shared = try Shared.extract(&shared_ctx);
+    const a, const p, const b, const q = shared.next().?;
+    try expect(a.eql(b));
+    try expect(p == q);
+    try expectEqual(2, Shared.access.shared.entries.len);
 }
 
 test "sparse components are matched per entity" {
@@ -299,6 +347,11 @@ test "sparse components are matched per entity" {
         pos: *const Position,
         health: *Health,
     });
+    const spec = comptime ecs.system.param.access(WithHealth);
+    try expectEqual(2, spec.shared.entries.len);
+    try expectEqual(Access.Domain.component, spec.shared.entries[1].domain);
+    try expect(spec.shared.entries[1].target == Health);
+    try expectEqual(Access.Mode.write, spec.shared.entries[1].mode);
     var with_health_ctx = WithHealth.Context.init(&world);
     defer with_health_ctx.deinit();
     var with_health = try WithHealth.extract(&with_health_ctx);
@@ -420,6 +473,62 @@ test "filters narrow the archetypes a query visits" {
     try expect(without_velocity.next().?.id.eql(still));
     try expect(without_velocity.next().?.id.eql(frozen));
     try expect(without_velocity.next() == null);
+}
+
+test "access conditions combine Item requirements with complete filter semantics" {
+    const allocator = std.testing.allocator;
+    var registry = component.Registry.init(allocator);
+    defer registry.deinit();
+    const ids = .{
+        try registry.register(Position),
+        try registry.register(Velocity),
+        try registry.register(Frozen),
+        try registry.register(Health),
+    };
+    const queries = .{
+        Query(struct { EntityId }),
+        Query(struct { *const Position }),
+        QueryF(struct { EntityId }, .{With(Health)}),
+        Query(struct { *const Position, *Health }),
+        QueryF(struct { *const Position }, Without(Frozen)),
+        QueryF(struct { *const Position }, .{
+            Any(.{ With(Velocity), With(Health) }),
+            Without(Frozen),
+        }),
+        QueryF(struct { *const Position }, All(.{ With(Velocity), Without(Frozen) })),
+        QueryF(struct { *const Position }, Any(.{})),
+        QueryF(struct { EntityId }, All(.{})),
+        QueryF(struct { *const Position }, With(.{})),
+        QueryF(struct { *Position }, Without(Position)),
+    };
+    inline for (queries, 0..) |Q, i| {
+        const spec = comptime ecs.system.param.access(Q);
+        var filter = try Filter.init(allocator, &registry, spec.shared.filter.?);
+        defer filter.deinit(allocator);
+        for (0..16) |mask| {
+            var sig = entity.Signature.init(allocator);
+            defer sig.deinit(allocator);
+            inline for (ids, 0..) |id, bit| {
+                if (mask & (@as(usize, 1) << bit) != 0) try sig.add(allocator, &.{id});
+            }
+            const p = mask & 1 != 0;
+            const v = mask & 2 != 0;
+            const f = mask & 4 != 0;
+            const h = mask & 8 != 0;
+            const expected = [_]bool{
+                true,           p,     h,    p and h, p and !f, p and (v or h) and !f,
+                p and v and !f, false, true, p,       false,
+            };
+            const matches = switch (filter.judgeArchetype(sig)) {
+                .accept => true,
+                .reject => false,
+                .per_entity => filter.judgeEntity(sig),
+            };
+            try expectEqual(expected[i], matches);
+        }
+    }
+    // An unsatisfiable filter does not remove the declared component write.
+    try expectEqual(Access.Mode.write, queries[10].access.shared.entries[0].mode);
 }
 
 test "extract refreshes the cached archetypes" {
