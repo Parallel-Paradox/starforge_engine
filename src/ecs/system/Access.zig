@@ -51,7 +51,11 @@ pub const Group = union(enum) {
     exclusive,
     /// Shared access to the world, but listed entries may conflict with other parameters.
     /// An empty group still reads world structure and conflicts with exclusive access.
-    shared: struct { entries: []const Entry = &.{} },
+    shared: struct {
+        entries: []const Entry = &.{},
+        /// Cached query condition; conservative conflict checks do not inspect it.
+        filter: ?Condition = null,
+    },
 
     pub fn conflicts(self: Group, other: Group) bool {
         return switch (self) {
@@ -60,16 +64,44 @@ pub const Group = union(enum) {
             .shared => |a| switch (other) {
                 .none => false,
                 .exclusive => true,
-                .shared => |b| blk: {
-                    for (a.entries) |lhs| {
-                        for (b.entries) |rhs| {
-                            if (lhs.conflicts(rhs)) break :blk true;
-                        }
-                    }
-                    break :blk false;
-                },
+                .shared => |b| entriesConflict(a.entries, b.entries),
             },
         };
+    }
+
+    fn entriesConflict(a: []const Entry, b: []const Entry) bool {
+        for (a) |lhs| {
+            for (b) |rhs| {
+                if (lhs.conflicts(rhs)) return true;
+            }
+        }
+        return false;
+    }
+};
+
+/// A query condition with cached type identities and filter-local breadth-first spans.
+/// Its root is node 0; present conditions always contain at least one node.
+pub const Condition = struct {
+    nodes: []const Node,
+
+    pub const Node = union(enum) {
+        leaf: struct { type_id: TypeId, require: bool },
+        branch: Filter.Branch,
+    };
+
+    fn init(comptime root: Filter.Node.Spec, nodes: []Node) Condition {
+        std.debug.assert(nodes.len == root.nodeCount());
+        const seed = comptime Filter.getSeed(root);
+        inline for (seed, 0..) |entry, i| {
+            nodes[i] = switch (entry) {
+                .leaf => |leaf| .{ .leaf = .{
+                    .type_id = TypeId.of(leaf.component),
+                    .require = leaf.require,
+                } },
+                .branch => |branch| .{ .branch = branch },
+            };
+        }
+        return .{ .nodes = nodes };
     }
 };
 
@@ -95,19 +127,22 @@ pub const Spec = union(enum) {
         return comptime switch (self) {
             .none => null,
             .exclusive => if (other == .none) null else .{ null, null },
-            .shared => |a| switch (other) {
-                .none => null,
-                .exclusive => .{ null, null },
-                .shared => |b| blk: {
-                    for (a.entries, 0..) |lhs, i| {
-                        for (b.entries, 0..) |rhs, j| {
-                            if (lhs.conflicts(rhs)) break :blk .{ i, j };
-                        }
-                    }
-                    break :blk null;
-                },
-            },
+            .shared => |a| sharedOverlap(a.entries, other),
         };
+    }
+
+    fn sharedOverlap(
+        comptime entries: []const Entry.Spec,
+        comptime other: Spec,
+    ) ?struct { ?usize, ?usize } {
+        if (other == .none) return null;
+        if (other == .exclusive) return .{ null, null };
+        for (entries, 0..) |lhs, i| {
+            for (other.shared.entries, 0..) |rhs, j| {
+                if (lhs.conflicts(rhs)) return .{ i, j };
+            }
+        }
+        return null;
     }
 };
 
@@ -150,6 +185,72 @@ pub fn findConflict(comptime specs: []const Spec) ?Conflict {
     };
 }
 
+/// Fixed-size storage for runtime access metadata.
+/// Keep it alive and unmoved while borrowed Access views are in use.
+pub fn Storage(comptime specs: []const Spec) type {
+    const counts = blk: {
+        var entries: usize = 0;
+        var nodes: usize = 0;
+        for (specs) |spec| {
+            if (spec == .shared) {
+                entries += spec.shared.entries.len;
+                if (spec.shared.filter) |filter| nodes += filter.nodeCount();
+            }
+        }
+        break :blk .{ .entries = entries, .nodes = nodes };
+    };
+
+    return struct {
+        groups: [specs.len]Group,
+        entries: [counts.entries]Entry,
+        nodes: [counts.nodes]Condition.Node,
+
+        /// Materializes identities and initializes borrowed slices in place.
+        /// Returned views may be copied, but must not outlive or mutate their backing storage.
+        pub fn init(self: *@This()) Access {
+            comptime var entry_offset: usize = 0;
+            comptime var node_offset: usize = 0;
+            inline for (specs, 0..) |spec, i| {
+                self.groups[i] = switch (spec) {
+                    .none => .none,
+                    .exclusive => .exclusive,
+                    .shared => self.sharedGroup(spec, entry_offset, node_offset),
+                };
+                comptime {
+                    if (spec == .shared) {
+                        entry_offset += spec.shared.entries.len;
+                        if (spec.shared.filter) |root| node_offset += root.nodeCount();
+                    }
+                }
+            }
+            return .{ .groups = &self.groups };
+        }
+
+        fn sharedGroup(
+            self: *@This(),
+            comptime spec: Spec,
+            comptime entry_start: usize,
+            comptime node_start: usize,
+        ) Group {
+            const shared = spec.shared;
+            const entries = self.entries[entry_start .. entry_start + shared.entries.len];
+            inline for (shared.entries, 0..) |entry, i| {
+                entries[i] = .{
+                    .domain = entry.domain,
+                    .type_id = TypeId.of(entry.target),
+                    .mode = entry.mode,
+                };
+            }
+            const node_count = comptime if (shared.filter) |root| root.nodeCount() else 0;
+            const nodes = self.nodes[node_start .. node_start + node_count];
+            return .{ .shared = .{
+                .entries = entries,
+                .filter = if (shared.filter) |root| Condition.init(root, nodes) else null,
+            } };
+        }
+    };
+}
+
 /// Conservative pairwise check. Entries borrow caller-owned storage with cached, valid TypeIds.
 /// Does not allocate, look up registry ids, or inspect query matching conditions.
 pub fn conflicts(self: Access, other: Access) bool {
@@ -161,6 +262,7 @@ pub fn conflicts(self: Access, other: Access) bool {
     return false;
 }
 
+const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectEqualDeep = std.testing.expectEqualDeep;
 
@@ -169,77 +271,57 @@ const write: Entry.Spec = .{ .domain = .component, .target = u32, .mode = .write
 const read_spec: Spec = .{ .shared = .{ .entries = &.{read} } };
 const write_spec: Spec = .{ .shared = .{ .entries = &.{write} } };
 
-test "entry conflicts require matching domain and type with at least one writer" {
-    inline for (.{ u32, i32 }) |T| {
-        inline for ([_]Domain{ .component, .resource }) |lhs_domain| {
-            inline for ([_]Domain{ .component, .resource }) |rhs_domain| {
-                inline for ([_]Mode{ .read, .write }) |lhs_mode| {
-                    inline for ([_]Mode{ .read, .write }) |rhs_mode| {
-                        const lhs: Entry.Spec = .{
-                            .domain = lhs_domain,
-                            .target = u32,
-                            .mode = lhs_mode,
-                        };
-                        const rhs: Entry.Spec = .{
-                            .domain = rhs_domain,
-                            .target = T,
-                            .mode = rhs_mode,
-                        };
-                        const a: Entry = .{
-                            .domain = lhs.domain,
-                            .type_id = TypeId.of(lhs.target),
-                            .mode = lhs.mode,
-                        };
-                        const b: Entry = .{
-                            .domain = rhs.domain,
-                            .type_id = TypeId.of(rhs.target),
-                            .mode = rhs.mode,
-                        };
-                        const expected = lhs_domain == rhs_domain and T == u32 and
-                            (lhs_mode == .write or rhs_mode == .write);
-                        try expectEqual(expected, lhs.conflicts(rhs));
-                        try expectEqual(expected, a.conflicts(b));
-                        try expectEqual(expected, b.conflicts(a));
-                    }
-                }
-            }
-        }
-    }
-}
-
-test "none exclusive and shared groups follow the same comptime and runtime rules" {
-    const reads = [_]Entry{.{ .domain = .component, .type_id = TypeId.of(u32), .mode = .read }};
-    const writes = [_]Entry{.{ .domain = .component, .type_id = TypeId.of(u32), .mode = .write }};
-    const specs = [_]Spec{ .none, .exclusive, .{ .shared = .{} }, read_spec, write_spec };
-    const accesses = [_]Group{
-        .none,
-        .exclusive,
-        .{ .shared = .{} },
-        .{ .shared = .{ .entries = &reads } },
-        .{ .shared = .{ .entries = &writes } },
+test "declared and runtime conflicts agree on access modes domains and scopes" {
+    const Tag = struct {
+        pub const se_component: engine.ecs.component.Mark = .{};
     };
-    const expected = [5][5]bool{
-        .{ false, false, false, false, false },
-        .{ false, true, true, true, true },
-        .{ false, true, false, false, false },
-        .{ false, true, false, false, true },
-        .{ false, true, false, true, true },
+    const empty: Spec = .{ .shared = .{} };
+    const resource: Spec = .{ .shared = .{ .entries = &.{
+        .{ .domain = .resource, .target = u32, .mode = .write },
+    } } };
+    const different: Spec = .{ .shared = .{ .entries = &.{
+        .{ .domain = .component, .target = i32, .mode = .write },
+    } } };
+    const with_tag: Spec = .{ .shared = .{
+        .entries = &.{write},
+        .filter = Filter.With(Tag),
+    } };
+    const without_tag: Spec = .{ .shared = .{
+        .entries = &.{write},
+        .filter = Filter.Without(Tag),
+    } };
+    const cases = [_]struct { a: Spec, b: Spec, conflict: bool }{
+        .{ .a = .none, .b = .exclusive, .conflict = false },
+        .{ .a = .exclusive, .b = .exclusive, .conflict = true },
+        .{ .a = .exclusive, .b = read_spec, .conflict = true },
+        .{ .a = .exclusive, .b = empty, .conflict = true },
+        .{ .a = empty, .b = write_spec, .conflict = false },
+        .{ .a = read_spec, .b = read_spec, .conflict = false },
+        .{ .a = read_spec, .b = write_spec, .conflict = true },
+        .{ .a = write_spec, .b = write_spec, .conflict = true },
+        .{ .a = write_spec, .b = resource, .conflict = false },
+        .{ .a = resource, .b = resource, .conflict = true },
+        .{ .a = write_spec, .b = different, .conflict = false },
+        .{ .a = with_tag, .b = without_tag, .conflict = true },
     };
-    inline for (specs, 0..) |a, i| {
-        inline for (specs, 0..) |b, j| {
-            try expectEqual(expected[i][j], a.conflicts(b));
-            const lhs: Access = .{ .groups = accesses[i .. i + 1] };
-            const rhs: Access = .{ .groups = accesses[j .. j + 1] };
-            try expectEqual(expected[i][j], lhs.conflicts(rhs));
-        }
+    inline for (cases) |case| {
+        var a: Storage(&.{ .none, case.a }) = undefined;
+        var b: Storage(&.{ .none, case.b }) = undefined;
+        const lhs = a.init();
+        const rhs = b.init();
+        try expect(lhs.groups.ptr != rhs.groups.ptr);
+        try expectEqual(case.conflict, case.a.conflicts(case.b));
+        try expectEqual(case.conflict, case.b.conflicts(case.a));
+        try expectEqual(case.conflict, lhs.conflicts(rhs));
+        try expectEqual(case.conflict, rhs.conflicts(lhs));
     }
-    const empty: Access = .{};
-    const reader: Access = .{ .groups = &.{ .none, accesses[3] } };
-    const writer: Access = .{ .groups = &.{ .none, accesses[4] } };
-    try expectEqual(false, empty.conflicts(writer));
-    try expectEqual(false, reader.conflicts(empty));
-    try expectEqual(true, reader.conflicts(writer));
-    try expectEqual(true, writer.conflicts(reader));
+    var storage: Storage(&.{}) = undefined;
+    const view = storage.init();
+    const exclusive: Access = .{ .groups = &.{.exclusive} };
+    try expectEqual(0, @sizeOf(@TypeOf(storage)));
+    try expectEqual(0, view.groups.len);
+    try expect(!view.conflicts(exclusive));
+    try expect(!exclusive.conflicts(view));
 }
 
 test "findConflict reports original parameter and entry locations" {
@@ -269,30 +351,80 @@ test "findConflict reports original parameter and entry locations" {
         .first = .{ .param = 0 },
         .second = .{ .param = 2 },
     }), comptime findConflict(&.{ .exclusive, .none, .{ .shared = .{} } }));
-    try expectEqualDeep(@as(?Conflict, .{
-        .first = .{ .param = 0 },
-        .second = .{ .param = 1 },
-    }), comptime findConflict(&.{ .exclusive, .exclusive }));
 }
 
-test "query conditions preserve parameter scopes without relaxing conservative conflicts" {
+test "storage retains entries and local condition spans in its owner" {
+    const Payload = struct {
+        pub const se_component: engine.ecs.component.Mark = .{};
+        pub const se_resource: engine.ecs.resource.Mark = .{};
+    };
     const Tag = struct {
         pub const se_component: engine.ecs.component.Mark = .{};
     };
-    const a: Spec = .{ .shared = .{
-        .entries = &.{write},
-        .filter = Filter.With(Tag),
-    } };
-    const b: Spec = .{ .shared = .{
-        .entries = &.{write},
-        .filter = Filter.Without(Tag),
-    } };
-    try expectEqual(Tag, a.shared.filter.?.leaf.component);
-    try expectEqual(true, a.shared.filter.?.leaf.require);
-    try expectEqual(false, b.shared.filter.?.leaf.require);
-    try expectEqual(true, a.conflicts(b));
-    try expectEqualDeep(@as(?Conflict, .{
-        .first = .{ .param = 0, .entry = 0 },
-        .second = .{ .param = 1, .entry = 0 },
-    }), comptime findConflict(&.{ a, b }));
+    const Sparse = struct {
+        pub const se_component: engine.ecs.component.Mark = .{ .storage = .sparse_set };
+    };
+    const payload_read: Entry.Spec = .{ .domain = .component, .target = Payload, .mode = .read };
+    const specs = [_]Spec{
+        .{ .shared = .{ .entries = &.{payload_read}, .filter = Filter.With(Payload) } },
+        .{ .shared = .{
+            .entries = &.{
+                .{ .domain = .component, .target = Payload, .mode = .write },
+                .{ .domain = .component, .target = Sparse, .mode = .read },
+            },
+            .filter = Filter.All(.{
+                Filter.With(Payload),
+                Filter.Any(.{ Filter.Without(Tag), Filter.With(Sparse) }),
+                Filter.All(.{}),
+                Filter.Any(.{}),
+            }),
+        } },
+        .{ .shared = .{ .filter = Filter.Any(.{}) } },
+        .{ .shared = .{ .entries = &.{ payload_read, payload_read }, .filter = Filter.All(.{}) } },
+        .{ .shared = .{ .entries = &.{
+            .{ .domain = .resource, .target = Payload, .mode = .write },
+        } } },
+    };
+    const Owner = struct { storage: Storage(&specs) };
+    const owner = try std.testing.allocator.create(Owner);
+    defer std.testing.allocator.destroy(owner);
+    const access = owner.storage.init();
+    const copied_view = access;
+    const groups = copied_view.groups;
+    const p = TypeId.of(Payload);
+    const s = TypeId.of(Sparse);
+    const expected_entries = [_]Entry{
+        .{ .domain = .component, .type_id = p, .mode = .read },
+        .{ .domain = .component, .type_id = p, .mode = .write },
+        .{ .domain = .component, .type_id = s, .mode = .read },
+        .{ .domain = .component, .type_id = p, .mode = .read },
+        .{ .domain = .component, .type_id = p, .mode = .read },
+        .{ .domain = .resource, .type_id = p, .mode = .write },
+    };
+    const expected_nodes = [_]Condition.Node{
+        .{ .leaf = .{ .type_id = p, .require = true } },
+        .{ .branch = .{ .kind = .all, .child_span = .{ .start = 1, .end = 5 } } },
+        .{ .leaf = .{ .type_id = p, .require = true } },
+        .{ .branch = .{ .kind = .any, .child_span = .{ .start = 5, .end = 7 } } },
+        .{ .branch = .{ .kind = .all, .child_span = .{ .start = 7, .end = 7 } } },
+        .{ .branch = .{ .kind = .any, .child_span = .{ .start = 7, .end = 7 } } },
+        .{ .leaf = .{ .type_id = TypeId.of(Tag), .require = false } },
+        .{ .leaf = .{ .type_id = s, .require = true } },
+        .{ .branch = .{ .kind = .any, .child_span = .{ .start = 1, .end = 1 } } },
+        .{ .branch = .{ .kind = .all, .child_span = .{ .start = 1, .end = 1 } } },
+    };
+    try expectEqualDeep(expected_entries, owner.storage.entries);
+    try expectEqualDeep(expected_nodes, owner.storage.nodes);
+    try expect(&groups[0] == &owner.storage.groups[0]);
+    for (groups, [_]usize{ 0, 1, 3, 3, 5 }, [_]usize{ 1, 2, 0, 2, 1 }) |group, start, len| {
+        const entries = group.shared.entries;
+        try expectEqual(len, entries.len);
+        if (len != 0) try expect(&entries[0] == &owner.storage.entries[start]);
+    }
+    inline for (.{ 0, 1, 2, 3 }, .{ 0, 1, 8, 9 }, .{ 1, 7, 1, 1 }) |i, start, len| {
+        const nodes = groups[i].shared.filter.?.nodes;
+        try expectEqual(len, nodes.len);
+        try expect(&nodes[0] == &owner.storage.nodes[start]);
+    }
+    try expectEqual(null, groups[4].shared.filter);
 }

@@ -219,14 +219,15 @@ pub fn normalizeRoot(comptime filter: anytype) ?Node.Spec {
     @compileError("init expects a Filter description or a tuple of Filter descriptions");
 }
 
-const Seed = union(enum) {
+/// Flat layout retaining component types for conversion into runtime identities.
+pub const Seed = union(enum) {
     leaf: Leaf.Spec,
     branch: Branch,
 };
 
 /// Lays out `root` breadth-first: the root sits at index 0 and every branch owns a
 /// contiguous `child_span` covering its direct children.
-fn getSeed(comptime root: Node.Spec) [root.nodeCount()]Seed {
+pub fn getSeed(comptime root: Node.Spec) [root.nodeCount()]Seed {
     var seed: [root.nodeCount()]Seed = undefined;
     var queue: [root.nodeCount()]Node.Spec = undefined;
     var slots: [root.nodeCount()]usize = undefined;
