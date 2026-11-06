@@ -1,5 +1,6 @@
 pub const param = @import("param.zig");
 
+pub const Access = @import("Access.zig");
 pub const System = @import("System.zig");
 
 /// Asserts that `func` is a system function: a non-generic, non-variadic
@@ -36,5 +37,6 @@ pub fn assertSystem(comptime func: anytype) void {
 
 test {
     _ = param;
+    _ = Access;
     _ = System;
 }
