@@ -109,9 +109,7 @@ test "query contexts satisfy the Context contract" {
     const Q = query.Query(struct { engine.ecs.entity.Id });
     try expect(Context(Q) == query.State);
     const spec = comptime access(Q);
-    try expectEqual(0, spec.shared.entries.len);
-    try expect(spec.shared.filter.?.branch.kind == .all);
-    try expectEqual(0, spec.shared.filter.?.branch.children.len);
+    try expectEqual(0, spec.shared.components.entries.len);
     const exclusive: Access.Spec = .exclusive;
     try expect(spec.isConflict(exclusive));
 }
@@ -144,8 +142,8 @@ test "access validates declarations and defaults undeclared parameters to exclus
         }
     };
     const Declared = struct {
-        pub const access: Access.Spec = .{ .shared = .{ .entries = &.{
-            .{ .domain = .resource, .target = u32, .mode = .write },
+        pub const access: Access.Spec = .{ .shared = .{ .resources = &.{
+            .{ .target = u32, .mode = .write },
         } } };
 
         pub fn extract(_: *World) error{}!@This() {
@@ -160,9 +158,9 @@ test "access validates declarations and defaults undeclared parameters to exclus
         try expect(access(P) == .none);
     }
     const declared = comptime access(Declared);
-    try expectEqual(1, declared.shared.entries.len);
-    const entry = declared.shared.entries[0];
-    try expectEqual(Access.Domain.resource, entry.domain);
+    try expectEqual(0, declared.shared.components.entries.len);
+    try expectEqual(1, declared.shared.resources.len);
+    const entry = declared.shared.resources[0];
     try expect(entry.target == u32);
     try expectEqual(Access.Mode.write, entry.mode);
 

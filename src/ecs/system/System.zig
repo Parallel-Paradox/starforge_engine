@@ -10,7 +10,6 @@ const World = engine.ecs.World;
 const TypeId = engine.reflect.TypeId;
 const Access = @import("Access.zig");
 const param = @import("param.zig");
-const mod = @import("mod.zig");
 
 ptr: *anyopaque,
 vtable: *const VTable,
@@ -30,8 +29,14 @@ pub fn deinit(self: *@This(), world: *World) void {
     self.vtable.deinit(self.ptr, world);
 }
 
+/// Whether the two systems may not run at the same time because their accesses can
+/// overlap.
+pub fn isConflict(self: System, other: System) bool {
+    return self.access.isConflict(other.access);
+}
+
 pub fn Builder(comptime func: anytype) type {
-    const specs = comptime mod.accessSpecs(func);
+    const specs = comptime Access.specOf(func);
     const fn_info = @typeInfo(@TypeOf(func)).@"fn";
 
     return struct {
@@ -54,11 +59,24 @@ pub fn Builder(comptime func: anytype) type {
         ctx_list: ContextList,
         access_storage: Access.Storage(specs),
 
-        pub fn build(world: *World) Allocator.Error!System {
+        pub const BuildError = Access.InitError || error{
+            /// Two parameters access the same data in ways that can overlap.
+            AccessConflict,
+        };
+
+        /// Builds a system for `world`. Components mentioned by parameter filters are
+        /// registered, so queries over components that no entity holds yet are fine.
+        /// Fails with `error.AccessConflict` when two parameters' filters can match a
+        /// common entity while one of them writes a component the other accesses.
+        pub fn build(world: *World) BuildError!System {
             const self = try world.allocator.create(@This());
             errdefer world.allocator.destroy(self);
 
             self.world = world;
+            const access = try self.access_storage.init(world.allocator, world.compReg());
+            errdefer self.access_storage.deinit(world.allocator);
+            if (access.findSelfConflict() != null) return error.AccessConflict;
+
             self.ctx_list = undefined;
             inline for (fn_info.param_types, 0..) |maybe_param, i| {
                 const P = maybe_param.?;
@@ -71,7 +89,7 @@ pub fn Builder(comptime func: anytype) type {
             return .{
                 .ptr = self,
                 .vtable = &vtable,
-                .access = self.access_storage.init(),
+                .access = access,
             };
         }
 
@@ -108,6 +126,7 @@ pub fn Builder(comptime func: anytype) type {
                 }
             }
 
+            state.access_storage.deinit(world_.allocator);
             world_.allocator.destroy(state);
         }
 
@@ -151,8 +170,8 @@ const ProbeParam = struct {
     probe: *Probe,
 
     pub const Context = ProbeCtx;
-    pub const access: Access.Spec = .{ .shared = .{ .entries = &.{
-        .{ .domain = .resource, .target = Probe, .mode = .write },
+    pub const access: Access.Spec = .{ .shared = .{ .resources = &.{
+        .{ .target = Probe, .mode = .write },
     } } };
 
     pub fn extract(ctx: *ProbeCtx) error{}!@This() {
@@ -196,16 +215,15 @@ test "system contexts and access survive runs and extraction failures" {
         const view = system.access;
         try expect(view.groups[0] == .none);
         try expect(view.groups[1] == .none);
-        const entry = view.groups[2].shared.entries[0];
+        const entry = view.groups[2].shared.resources[0];
         try expect(entry.type_id.eql(TypeId.of(Probe)));
-        try expectEqual(Access.Domain.resource, entry.domain);
         try expectEqual(Access.Mode.write, entry.mode);
         const state: *Builder(sampleRun) = @ptrCast(@alignCast(system.ptr));
         try expect(&view.groups[0] == &state.access_storage.groups[0]);
         try system.run(&world);
         try system.run(&world);
         try expect(view.groups.ptr == system.access.groups.ptr);
-        try expect(view.groups[2].shared.entries[0].type_id.eql(entry.type_id));
+        try expect(view.groups[2].shared.resources[0].type_id.eql(entry.type_id));
     }
 
     const Failing = struct {
@@ -234,7 +252,7 @@ test "system contexts and access survive runs and extraction failures" {
         defer system.deinit(&world);
         const view = system.access;
         try expectError(error.Stopped, system.run(&world));
-        try expect(view.groups[0].shared.entries[0].type_id.eql(TypeId.of(Probe)));
+        try expect(view.groups[0].shared.resources[0].type_id.eql(TypeId.of(Probe)));
     }
     const probe = world.getResource(Probe).?;
     try expect(probe.inits == 2);
@@ -287,10 +305,10 @@ test "resource parameters resolve their id during build" {
     defer a.deinit(&world);
     var b = try Builder(Read.run).build(&world);
     defer b.deinit(&world);
-    try expect(!a.access.isConflict(b.access));
-    try expect(a.access.isConflict(system.access));
-    try expect(system.access.isConflict(a.access));
-    try expect(system.access.isConflict(system.access));
+    try expect(!a.isConflict(b));
+    try expect(a.isConflict(system));
+    try expect(system.isConflict(a));
+    try expect(system.isConflict(system));
     try expect(a.access.groups.ptr != b.access.groups.ptr);
     try a.run(&world);
     try system.run(&world);
@@ -298,7 +316,7 @@ test "resource parameters resolve their id during build" {
     try expect(world.getResource(Counter).?.value == 4);
 }
 
-test "built systems expose conservative component resource and exclusive conflicts" {
+test "built systems expose exact component resource and exclusive conflicts" {
     const query = engine.ecs.query;
     const resource = engine.ecs.resource;
     const EntityId = engine.ecs.entity.Id;
@@ -369,7 +387,9 @@ test "built systems expose conservative component resource and exclusive conflic
         .{ .a = .read, .b = .read, .conflict = false },
         .{ .a = .read, .b = .write, .conflict = true },
         .{ .a = .write, .b = .write, .conflict = true },
-        .{ .a = .with_tag, .b = .without_tag, .conflict = true },
+        .{ .a = .with_tag, .b = .without_tag, .conflict = false },
+        .{ .a = .with_tag, .b = .with_tag, .conflict = true },
+        .{ .a = .write, .b = .without_tag, .conflict = true },
         .{ .a = .write, .b = .res, .conflict = false },
         .{ .a = .read, .b = .res, .conflict = false },
         .{ .a = .ids, .b = .write, .conflict = false },
@@ -385,25 +405,21 @@ test "built systems expose conservative component resource and exclusive conflic
         .{ .a = .mixed, .b = .write, .conflict = true },
     };
     for (cases) |case| {
-        const a = systems[@backingInt(case.a)].access;
-        const b = systems[@backingInt(case.b)].access;
+        const a = systems[@backingInt(case.a)];
+        const b = systems[@backingInt(case.b)];
         try expectEqual(case.conflict, a.isConflict(b));
         try expectEqual(case.conflict, b.isConflict(a));
+        try expectEqual(case.conflict, a.access.isConflict(b.access));
     }
     const reader = systems[@backingInt(Kind.read)].access.groups[0].shared;
-    try expectEqual(2, reader.entries.len);
-    try expect(reader.entries[1].type_id.eql(TypeId.of(Sparse)));
+    try expectEqual(2, reader.components.entries.len);
+    try expectEqual(0, reader.resources.len);
+    try expect(reader.components.entries[1].type_id.eql(TypeId.of(Sparse)));
     const ids = systems[@backingInt(Kind.ids)].access.groups[0].shared;
-    try expectEqual(0, ids.entries.len);
-    try expectEqual(1, ids.filter.?.nodes.len);
-    const with_tag = systems[@backingInt(Kind.with_tag)].access.groups[0].shared;
-    const without_tag = systems[@backingInt(Kind.without_tag)].access.groups[0].shared;
-    try expect(with_tag.filter.?.nodes[2].leaf.type_id.eql(TypeId.of(Tag)));
-    try expect(with_tag.filter.?.nodes[2].leaf.require);
-    try expect(!without_tag.filter.?.nodes[2].leaf.require);
+    try expectEqual(0, ids.components.entries.len);
     try expect(systems[@backingInt(Kind.unknown)].access.groups[0] == .exclusive);
     for (&systems) |*system| try system.run(&world);
-    try expect(reader.entries[1].type_id.eql(TypeId.of(Sparse)));
+    try expect(reader.components.entries[1].type_id.eql(TypeId.of(Sparse)));
 
     // A second run must refresh the writer's cache to include a new archetype.
     const second = try world.addEntity(.{ Data{ .value = 10 }, Sparse{} });
@@ -423,4 +439,57 @@ test "built systems expose conservative component resource and exclusive conflic
         count += 1;
     }
     try expectEqual(2, count);
+}
+
+test "build checks parameter conflicts that filters may clear" {
+    const query = engine.ecs.query;
+    const With = query.Filter.With;
+    const Without = query.Filter.Without;
+    const Item = struct {
+        pub const se_component: engine.ecs.component.Mark = .{};
+        value: u32 = 0,
+    };
+    const Tag = struct {
+        pub const se_component: engine.ecs.component.Mark = .{};
+    };
+    const Other = struct {
+        pub const se_component: engine.ecs.component.Mark = .{};
+    };
+    const Functions = struct {
+        fn disjoint(
+            _: query.QueryF(struct { *Item }, With(Tag)),
+            _: query.QueryF(struct { *Item }, Without(Tag)),
+        ) void {}
+        fn overlapping(
+            _: query.QueryF(struct { *Item }, Without(Tag)),
+            _: query.Query(struct { *Item }),
+        ) void {}
+        fn differentComponents(
+            _: query.QueryF(struct { *Item }, With(Tag)),
+            _: query.QueryF(struct { *Item }, Without(Other)),
+        ) void {}
+        fn readers(
+            _: query.QueryF(struct { *const Item }, Without(Tag)),
+            _: query.Query(struct { *const Item }),
+        ) void {}
+    };
+
+    var world = World.init(std.testing.allocator, std.testing.io);
+    defer world.deinit();
+
+    // No entity exists yet, so building registers the components that filters mention.
+    try expect(world.compReg().idOf(Tag) == null);
+    var disjoint = try Builder(Functions.disjoint).build(&world);
+    defer disjoint.deinit(&world);
+    try expect(world.compReg().idOf(Tag) != null);
+    try expect(world.compReg().idOf(Item) != null);
+    try expectEqual(2, disjoint.access.groups.len);
+    try expect(!disjoint.access.groups[0].isConflict(disjoint.access.groups[1]));
+
+    try expectError(error.AccessConflict, Builder(Functions.overlapping).build(&world));
+    try expectError(error.AccessConflict, Builder(Functions.differentComponents).build(&world));
+
+    var readers = try Builder(Functions.readers).build(&world);
+    defer readers.deinit(&world);
+    try expect(readers.access.findSelfConflict() == null);
 }

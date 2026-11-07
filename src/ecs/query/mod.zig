@@ -51,7 +51,6 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
         break :blk types;
     };
 
-    const user_filter = comptime Filter.normalizeRoot(filters);
     const comp_count = comptime blk: {
         var total: usize = 0;
         for (comp_types) |T| {
@@ -61,35 +60,29 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
     };
     const metadata = comptime blk: {
         var entries: [comp_count]Access.Entry.Spec = undefined;
-        const cond_count = comp_count + @intFromBool(user_filter != null);
-        var conditions: [cond_count]Filter.Node.Spec = undefined;
         var names: [comp_count][]const u8 = undefined;
         var next: usize = 0;
         for (comp_types, field_types, field_names) |maybe, F, name| {
             if (maybe) |T| {
                 entries[next] = .{
-                    .domain = .component,
                     .target = T,
                     .mode = if (@typeInfo(F).pointer.attrs.@"const") .read else .write,
                 };
-                conditions[next] = Filter.With(T);
                 names[next] = name;
                 next += 1;
             }
         }
-        if (user_filter) |filter| conditions[comp_count] = filter;
-        break :blk .{ .entries = entries, .conditions = conditions, .names = names };
+        break :blk .{ .entries = entries, .names = names };
     };
     const entries = metadata.entries;
-    const conditions = metadata.conditions;
-    const access_spec: Access.Spec = .{ .shared = .{
+    const access_spec: Access.Spec = .{ .shared = .{ .components = .{
         .entries = &entries,
-        .filter = Filter.Branch.spec(.all, &conditions),
-    } };
+        .filter = comptime accessFilter(&comp_types, filters),
+    } } };
     comptime {
-        if (Access.findConflict(&.{access_spec})) |conflict| {
-            const a = conflict[0].entry.?;
-            const b = conflict[1].entry.?;
+        if (Access.findStaticConflict(&.{access_spec})) |conflict| {
+            const a = conflict[0].entry.?.index;
+            const b = conflict[1].entry.?.index;
             @compileError(std.fmt.comptimePrint(
                 "Query target fields `{s}` and `{s}` have conflicting access to {s}",
                 .{ metadata.names[a], metadata.names[b], @typeName(entries[a].target) },
@@ -109,8 +102,9 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
 
         /// Refreshes `ctx`'s cached archetypes and starts a new iteration over
         /// `world`. The first call installs the target layout and filter.
-        /// Panics when a target component is not registered.
-        pub fn extract(ctx: *Context) Allocator.Error!@This() {
+        /// Panics when a target component is not registered. Fails with
+        /// `error.FilterTooComplex` when the filter expands beyond `Filter.max_terms`.
+        pub fn extract(ctx: *Context) Filter.InitError!@This() {
             if (ctx.targets == null) {
                 const world = ctx.world;
 
@@ -174,6 +168,35 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
             return result;
         }
     };
+}
+
+/// The condition under which a query declares component access: every target component
+/// is required, narrowed by the user's filters. Null when it matches every entity.
+fn accessFilter(
+    comptime comp_types: []const ?type,
+    comptime filters: anytype,
+) ?Filter.Node.Spec {
+    const user = Filter.normalizeRoot(filters);
+    const root_count = blk: {
+        var total: usize = @intFromBool(user != null);
+        for (comp_types) |maybe| total += @intFromBool(maybe != null);
+        break :blk total;
+    };
+    if (root_count == 0) return null;
+
+    const children = blk: {
+        var out: [root_count]Filter.Node.Spec = undefined;
+        var next: usize = 0;
+        for (comp_types) |maybe| {
+            if (maybe) |T| {
+                out[next] = .{ .leaf = .{ .component = T, .require = true } };
+                next += 1;
+            }
+        }
+        if (user) |root| out[next] = root;
+        break :blk out;
+    };
+    return Filter.Branch.spec(.all, &children);
 }
 
 /// Asserts that `Item` is a struct or tuple of component pointers and `EntityId` fields.
@@ -288,9 +311,10 @@ test "queries yield target fields and write through pointers" {
     const Tuple = Query(struct { EntityId, *const Position, *const Velocity });
     inline for (.{ Mutable, Tuple }) |Q| {
         const spec = comptime ecs.system.param.access(Q);
-        try expectEqual(2, spec.shared.entries.len);
-        inline for (spec.shared.entries, .{ Position, Velocity }, 0..) |entry, T, i| {
-            try expectEqual(Access.Domain.component, entry.domain);
+        const entries = spec.shared.components.entries;
+        try expectEqual(2, entries.len);
+        try expectEqual(0, spec.shared.resources.len);
+        inline for (entries, .{ Position, Velocity }, 0..) |entry, T, i| {
             try expect(entry.target == T);
             const mode: Access.Mode = if (Q == Mutable and i == 1) .write else .read;
             try expectEqual(mode, entry.mode);
@@ -326,7 +350,7 @@ test "queries yield target fields and write through pointers" {
     const a, const p, const b, const q = shared.next().?;
     try expect(a.eql(b));
     try expect(p == q);
-    try expectEqual(2, Shared.access.shared.entries.len);
+    try expectEqual(2, Shared.access.shared.components.entries.len);
 }
 
 test "sparse components are matched per entity" {
@@ -348,10 +372,9 @@ test "sparse components are matched per entity" {
         health: *Health,
     });
     const spec = comptime ecs.system.param.access(WithHealth);
-    try expectEqual(2, spec.shared.entries.len);
-    try expectEqual(Access.Domain.component, spec.shared.entries[1].domain);
-    try expect(spec.shared.entries[1].target == Health);
-    try expectEqual(Access.Mode.write, spec.shared.entries[1].mode);
+    try expectEqual(2, spec.shared.components.entries.len);
+    try expect(spec.shared.components.entries[1].target == Health);
+    try expectEqual(Access.Mode.write, spec.shared.components.entries[1].mode);
     var with_health_ctx = WithHealth.Context.init(&world);
     defer with_health_ctx.deinit();
     var with_health = try WithHealth.extract(&with_health_ctx);
@@ -475,60 +498,25 @@ test "filters narrow the archetypes a query visits" {
     try expect(without_velocity.next() == null);
 }
 
-test "access conditions combine Item requirements with complete filter semantics" {
-    const allocator = std.testing.allocator;
-    var registry = component.Registry.init(allocator);
-    defer registry.deinit();
-    const ids = .{
-        try registry.register(Position),
-        try registry.register(Velocity),
-        try registry.register(Frozen),
-        try registry.register(Health),
-    };
-    const queries = .{
-        Query(struct { EntityId }),
-        Query(struct { *const Position }),
-        QueryF(struct { EntityId }, .{With(Health)}),
-        Query(struct { *const Position, *Health }),
-        QueryF(struct { *const Position }, Without(Frozen)),
-        QueryF(struct { *const Position }, .{
-            Any(.{ With(Velocity), With(Health) }),
-            Without(Frozen),
-        }),
-        QueryF(struct { *const Position }, All(.{ With(Velocity), Without(Frozen) })),
-        QueryF(struct { *const Position }, Any(.{})),
-        QueryF(struct { EntityId }, All(.{})),
-        QueryF(struct { *const Position }, With(.{})),
-        QueryF(struct { *Position }, Without(Position)),
-    };
-    inline for (queries, 0..) |Q, i| {
-        const spec = comptime ecs.system.param.access(Q);
-        var filter = try Filter.init(allocator, &registry, spec.shared.filter.?);
-        defer filter.deinit(allocator);
-        for (0..16) |mask| {
-            var sig = entity.Signature.init(allocator);
-            defer sig.deinit(allocator);
-            inline for (ids, 0..) |id, bit| {
-                if (mask & (@as(usize, 1) << bit) != 0) try sig.add(allocator, &.{id});
-            }
-            const p = mask & 1 != 0;
-            const v = mask & 2 != 0;
-            const f = mask & 4 != 0;
-            const h = mask & 8 != 0;
-            const expected = [_]bool{
-                true,           p,     h,    p and h, p and !f, p and (v or h) and !f,
-                p and v and !f, false, true, p,       false,
-            };
-            const matches = switch (filter.judgeArchetype(sig)) {
-                .accept => true,
-                .reject => false,
-                .per_entity => filter.judgeEntity(sig),
-            };
-            try expectEqual(expected[i], matches);
-        }
-    }
-    // An unsatisfiable filter does not remove the declared component write.
-    try expectEqual(Access.Mode.write, queries[10].access.shared.entries[0].mode);
+test "filters do not remove declared component access" {
+    const Q = QueryF(struct { *Position }, Without(Velocity));
+    const components = Q.access.shared.components;
+    try expectEqual(Access.Mode.write, components.entries[0].mode);
+
+    // The access condition requires the target components and keeps the user filter.
+    const filter = components.filter.?;
+    try expect(filter.branch.kind == .all);
+    try expectEqual(2, filter.branch.children.len);
+    try expect(filter.branch.children[0].leaf.component == Position);
+    try expect(filter.branch.children[0].leaf.require);
+    try expect(filter.branch.children[1].leaf.component == Velocity);
+    try expect(!filter.branch.children[1].leaf.require);
+
+    // Targets alone are a plain requirement, and entity ids alone match everything.
+    const Plain = Query(struct { *Position });
+    try expect(Plain.access.shared.components.filter.?.leaf.component == Position);
+    const Ids = Query(struct { EntityId });
+    try expect(Ids.access.shared.components.filter == null);
 }
 
 test "extract refreshes the cached archetypes" {

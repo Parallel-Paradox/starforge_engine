@@ -1,4 +1,5 @@
 words = [
+    "DNF",
     "JST",
     "NPT",
     "NST",
@@ -21,4 +22,7 @@ words = [
     "vtable",
     "zon",
 ]
-ignore_patterns = ["N-V-__[A-Za-z0-9_-]{30,}", "\"-D[A-Za-z0-9_=]+\""]
+ignore_patterns = [
+    "N-V-__[A-Za-z0-9_-]{30,}",
+    '"-D[A-Za-z0-9_=]+"',
+]

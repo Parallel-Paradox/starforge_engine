@@ -51,8 +51,8 @@ fn ResourceParam(comptime T: type, comptime mutable: bool) type {
     return struct {
         ptr: if (mutable) *T else *const T,
 
-        pub const access: Access.Spec = .{ .shared = .{ .entries = &.{
-            .{ .domain = .resource, .target = T, .mode = if (mutable) .write else .read },
+        pub const access: Access.Spec = .{ .shared = .{ .resources = &.{
+            .{ .target = T, .mode = if (mutable) .write else .read },
         } } };
 
         /// Caches the resource ID so runs skip the type-to-ID hash lookup.
@@ -94,9 +94,9 @@ test "resource parameters cache their id and borrow shared storage" {
         [_]Access.Mode{ .read, .write },
     ) |P, mode| {
         const spec = comptime param.access(P);
-        try testing.expectEqual(1, spec.shared.entries.len);
-        const entry = spec.shared.entries[0];
-        try testing.expectEqual(Access.Domain.resource, entry.domain);
+        try testing.expectEqual(0, spec.shared.components.entries.len);
+        try testing.expectEqual(1, spec.shared.resources.len);
+        const entry = spec.shared.resources[0];
         try testing.expect(entry.target == Counter);
         try testing.expectEqual(mode, entry.mode);
     }
