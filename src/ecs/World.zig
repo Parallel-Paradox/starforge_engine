@@ -105,7 +105,56 @@ pub fn addEntity(
     return self.entity_reg.addBundle(bundle);
 }
 
+/// Returns whether `id` identifies a live entity.
+pub fn containsEntity(self: *const @This(), id: EntityId) bool {
+    return self.entity_reg.contains(id);
+}
+
+/// Borrows entity metadata, or returns null if the id is unknown, stale, or retired.
+/// Creating another entity may invalidate the pointer.
+pub fn getEntity(self: *const @This(), id: EntityId) ?*const entity.Entity {
+    return self.entity_reg.get(id);
+}
+
+/// Mutably borrows entity metadata, or returns null if the id is unknown, stale, or retired.
+/// Creating another entity may invalidate the pointer.
+/// Callers must preserve the entity's storage and signature invariants.
+pub fn getEntityMut(self: *@This(), id: EntityId) ?*entity.Entity {
+    return self.entity_reg.getMut(id);
+}
+
+/// Returns the number of live entities, excluding retired slots.
+pub fn entityCount(self: *const @This()) usize {
+    return self.entity_reg.len();
+}
+
+/// Checks for a component without registering its type.
+pub fn hasComponent(self: *const @This(), id: EntityId, comptime T: type) bool {
+    component.assertComponent(T, "hasComponent");
+    const comp_id = self.entity_reg.comp_reg.idOf(T) orelse return false;
+    return self.entity_reg.hasComponent(id, comp_id);
+}
+
+/// Borrows a component without registering its type; returns null if absent.
+/// Storage growth or structural changes may invalidate the pointer.
+pub fn getComponent(self: *const @This(), id: EntityId, comptime T: type) ?*const T {
+    component.assertComponent(T, "getComponent");
+    const comp_id = self.entity_reg.comp_reg.idOf(T) orelse return null;
+    const bytes = self.entity_reg.getComponent(id, comp_id) orelse return null;
+    return @ptrCast(@alignCast(bytes.ptr));
+}
+
+/// Mutably borrows a component without registering its type; returns null if absent.
+/// Storage growth or structural changes may invalidate the pointer.
+pub fn getComponentMut(self: *@This(), id: EntityId, comptime T: type) ?*T {
+    component.assertComponent(T, "getComponentMut");
+    const comp_id = self.entity_reg.comp_reg.idOf(T) orelse return null;
+    const bytes = self.entity_reg.getComponentMut(id, comp_id) orelse return null;
+    return @ptrCast(@alignCast(bytes.ptr));
+}
+
 const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
 const expectError = std.testing.expectError;
 
 const TestMark = component.Mark;
@@ -141,19 +190,31 @@ test "addEntity registers components and creates an entity" {
     const allocator = std.testing.allocator;
     var world = init(allocator, std.testing.io);
     defer world.deinit();
+    const readonly: *const @This() = &world;
+    try expectEqual(@as(usize, 0), readonly.entityCount());
 
     const id = try world.addEntity(.{
         Transform{ .position = .{ .x = 3, .y = 4 } },
         Health{ .value = 7 },
     });
 
-    const position_id = world.entity_reg.comp_reg.idOf(Position).?;
-    const health_id = world.entity_reg.comp_reg.idOf(Health).?;
-
-    const created = world.entity_reg.get(id).?;
+    try expectEqual(@as(usize, 1), readonly.entityCount());
+    try expect(readonly.containsEntity(id));
+    const created = readonly.getEntity(id).?;
     try expect(created.id.eql(id));
-    try expect(created.signature.has(position_id));
-    try expect(created.signature.has(health_id));
+    try expect(created.archetype_id.isValid());
+    try expectEqual(@as(usize, 1), created.sparse_comps.items.len);
+    try expect(world.getEntityMut(id).?.id.eql(id));
+    try expect(readonly.hasComponent(id, Position));
+    try expect(readonly.hasComponent(id, Health));
+    try expectEqual(@as(i32, 3), readonly.getComponent(id, Position).?.x);
+    try expectEqual(@as(i32, 4), readonly.getComponent(id, Position).?.y);
+    try expectEqual(@as(u32, 7), readonly.getComponent(id, Health).?.value);
+
+    world.getComponentMut(id, Position).?.x = 9;
+    world.getComponentMut(id, Health).?.value = 11;
+    try expectEqual(@as(i32, 9), readonly.getComponent(id, Position).?.x);
+    try expectEqual(@as(u32, 11), readonly.getComponent(id, Health).?.value);
 
     // A non-component field is a compile error:
     // _ = world.addEntity(.{ @as(u32, 1) });
@@ -174,6 +235,45 @@ test "addEntity delegates requirement completion to the entity registry" {
     const id = try world.addEntity(.{Root{}});
     const required = world.compReg().idOf(Required).?;
     try expect(world.entityReg().get(id).?.signature.has(required));
+}
+
+test "component access does not register types" {
+    var world = init(std.testing.allocator, std.testing.io);
+    defer world.deinit();
+    const readonly: *const @This() = &world;
+    const id = try world.addEntity(.{});
+
+    inline for (.{ Position, Health }) |T| {
+        try expect(world.compReg().idOf(T) == null);
+        try expect(!readonly.hasComponent(id, T));
+        try expect(readonly.getComponent(id, T) == null);
+        try expect(world.getComponentMut(id, T) == null);
+        try expect(world.compReg().idOf(T) == null);
+    }
+}
+
+test "component access supports zero sized and highly aligned types" {
+    inline for (.{ component.Storage.archetype, component.Storage.sparse_set }) |storage| {
+        const Tag = struct {
+            pub const se_component: TestMark = .{ .storage = storage };
+        };
+        const Aligned = struct {
+            pub const se_component: TestMark = .{ .storage = storage };
+            value: u32 align(64),
+        };
+        var world = init(std.testing.allocator, std.testing.io);
+        defer world.deinit();
+        const readonly: *const @This() = &world;
+
+        const tag = try world.addEntity(.{Tag{}});
+        try expect(readonly.getComponent(tag, Tag) != null);
+        world.getComponentMut(tag, Tag).?.* = .{};
+
+        const aligned = try world.addEntity(.{Aligned{ .value = 13 }});
+        try expectEqual(@as(u32, 13), readonly.getComponent(aligned, Aligned).?.value);
+        world.getComponentMut(aligned, Aligned).?.value = 23;
+        try expectEqual(@as(u32, 23), readonly.getComponent(aligned, Aligned).?.value);
+    }
 }
 
 test "addEntity releases the temporary bundle without disposing copied values" {

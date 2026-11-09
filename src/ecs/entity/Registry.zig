@@ -50,15 +50,88 @@ pub fn deinit(self: *@This()) void {
     self.comp_reg.deinit();
 }
 
-/// Returns the entity registered for `id`, or null if it is unknown or retired.
-/// The pointer is invalidated when another entity is created.
-pub fn get(self: *@This(), id: EntityId) ?*Entity {
+/// Returns whether `id` identifies a live entity, including its generation.
+pub fn contains(self: *const @This(), id: EntityId) bool {
+    return self.entityIndex(id) != null;
+}
+
+/// Returns the number of live entities, excluding retired slots.
+pub fn len(self: *const @This()) usize {
+    return self.entities.items.len - self.retired.items.len;
+}
+
+/// Returns whether there are no live entities.
+pub fn isEmpty(self: *const @This()) bool {
+    return self.len() == 0;
+}
+
+/// Borrows entity metadata, or returns null if `id` is unknown, stale, or retired.
+/// The pointer may be invalidated when another entity is created.
+pub fn get(self: *const @This(), id: EntityId) ?*const Entity {
+    const index = self.entityIndex(id) orelse return null;
+    return &self.entities.items[index];
+}
+
+/// Mutably borrows entity metadata, or returns null if `id` is unknown, stale, or retired.
+/// The pointer may be invalidated when another entity is created.
+/// Callers must preserve the entity's storage and signature invariants.
+pub fn getMut(self: *@This(), id: EntityId) ?*Entity {
+    const index = self.entityIndex(id) orelse return null;
+    return &self.entities.items[index];
+}
+
+fn entityIndex(self: *const @This(), id: EntityId) ?usize {
     const index = id.index.tryGet() orelse return null;
     if (index >= self.entities.items.len) return null;
+    if (!self.entities.items[index].id.eql(id)) return null;
+    return index;
+}
 
-    const entity = &self.entities.items[index];
-    if (!entity.id.eql(id)) return null;
-    return entity;
+/// Returns whether the live entity has the registered component.
+/// Unknown, stale, or reserved-only component ids return false.
+pub fn hasComponent(self: *const @This(), id: EntityId, comp_id: CompId) bool {
+    const entity = self.get(id) orelse return false;
+    _ = self.comp_reg.getById(comp_id) orelse return false;
+    return entity.signature.has(comp_id);
+}
+
+/// Borrows a component's bytes, or returns null if the entity or component is absent.
+/// Unknown, stale, or reserved-only ids return null. Does not create storage.
+/// The slice may be invalidated by storage growth or structural changes.
+pub fn getComponent(self: *const @This(), id: EntityId, comp_id: CompId) ?[]const u8 {
+    return self.componentBytes(id, comp_id);
+}
+
+/// Mutably borrows a component's bytes, or returns null if the entity or component is absent.
+/// Unknown, stale, or reserved-only ids return null. Does not create storage.
+/// The slice may be invalidated by storage growth or structural changes.
+pub fn getComponentMut(self: *@This(), id: EntityId, comp_id: CompId) ?[]u8 {
+    return self.componentBytes(id, comp_id);
+}
+
+fn componentBytes(self: *const @This(), id: EntityId, comp_id: CompId) ?[]u8 {
+    const entity = self.get(id) orelse return null;
+    const meta = self.comp_reg.getById(comp_id) orelse return null;
+    if (!entity.signature.has(comp_id)) return null;
+
+    switch (meta.storage) {
+        .archetype => {
+            const index = entity.archetype_id.index.tryGet() orelse return null;
+            if (index >= self.arche_reg.entries.items.len) return null;
+            const entry = &self.arche_reg.entries.items[index];
+            if (!entry.id.eql(entity.archetype_id)) return null;
+            const column = entry.archetype.meta.id_to_col.get(meta.typeId()) orelse return null;
+            return entry.archetype.at(column, entity.archetype_row).data;
+        },
+        .sparse_set => {
+            const set_id = self.sparse_reg.type_to_id.get(meta.typeId()) orelse return null;
+            const index = set_id.index.tryGet() orelse return null;
+            if (index >= self.sparse_reg.entries.items.len) return null;
+            const entry = &self.sparse_reg.entries.items[index];
+            if (!entry.id.eql(set_id)) return null;
+            return entry.set.getBytes(id);
+        },
+    }
 }
 
 pub const AddBundleError = AddParcelsError || Default.Error || error{
@@ -353,6 +426,40 @@ fn expectArchetypeValue(
     try expectEqual(expected, archetype.typedAt(T, column, row).ptr.*);
 }
 
+test "component access rejects absent and invalid ids without creating storage" {
+    const allocator = std.testing.allocator;
+    var registry = init(allocator);
+    defer registry.deinit();
+    const readonly: *const @This() = &registry;
+    const position_id = try registry.comp_reg.register(Position);
+    const health_id = try registry.comp_reg.register(Health);
+    const reserved = try registry.comp_reg.reserve(TypeId.of(Probe));
+    const empty = try registry.addBundle(try .init(allocator, .{}));
+
+    for ([_]CompId{ position_id, health_id, reserved, .invalid, CompId.init(100, 0) }) |comp_id| {
+        try expect(!readonly.hasComponent(empty, comp_id));
+        try expect(readonly.getComponent(empty, comp_id) == null);
+        try expect(registry.getComponentMut(empty, comp_id) == null);
+    }
+    try expectEqual(1, registry.arche_reg.entries.items.len);
+    try expectEqual(0, registry.sparse_reg.entries.items.len);
+
+    const id = try registry.addBundle(try .init(allocator, .{
+        Position{ .x = 3, .y = 4 },
+        Health{ .value = 7 },
+    }));
+    for ([_]CompId{ position_id, health_id }) |comp_id| {
+        const stale = CompId.init(comp_id.index.get(), comp_id.generation.next().get());
+        try expect(!readonly.hasComponent(id, stale));
+        try expect(readonly.getComponent(id, stale) == null);
+        try expect(registry.getComponentMut(id, stale) == null);
+    }
+    const stale = EntityId.init(id.index.get(), id.generation.next().get());
+    try expect(!readonly.hasComponent(stale, position_id));
+    try expect(readonly.getComponent(stale, position_id) == null);
+    try expect(registry.getComponentMut(stale, position_id) == null);
+}
+
 test "addBundle stores components and reuses archetype and sparse storage" {
     const allocator = std.testing.allocator;
     var registry = init(allocator);
@@ -369,8 +476,13 @@ test "addBundle stores components and reuses archetype and sparse storage" {
         const entity = registry.get(id).?;
         try expectEqual(i, id.index.get());
         try expectEqual(i, entity.archetype_row);
-        inline for (.{ Position, Velocity, Health }) |T|
-            try expect(entity.signature.has(registry.comp_reg.idOf(T).?));
+        inline for (.{ Position, Velocity, Health }) |T| {
+            const comp_id = registry.comp_reg.idOf(T).?;
+            try expect(registry.hasComponent(id, comp_id));
+            const bytes = registry.getComponent(id, comp_id).?;
+            try expectEqual(@sizeOf(T), bytes.len);
+            try expect(bytes.ptr == registry.getComponentMut(id, comp_id).?.ptr);
+        }
         const archetype = registry.arche_reg.getById(entity.archetype_id).?;
         try expectArchetypeValue(archetype, Position, i, .{ .x = value, .y = 4 });
         try expectArchetypeValue(archetype, Velocity, i, .{ .dx = value, .dy = 2 });
@@ -383,12 +495,20 @@ test "addBundle stores components and reuses archetype and sparse storage" {
     try expectEqual(1, registry.sparse_reg.entries.items.len);
 }
 
-test "addBundle accepts an empty bundle and get rejects unknown ids" {
+test "empty entity access reports metadata and rejects invalid ids" {
     const allocator = std.testing.allocator;
     var registry = init(allocator);
     defer registry.deinit();
 
+    const readonly: *const @This() = &registry;
+    try expect(readonly.isEmpty());
+    try expectEqual(0, readonly.len());
     const id = try registry.addBundle(try .init(allocator, .{}));
+    try expect(!readonly.isEmpty());
+    try expectEqual(1, readonly.len());
+    try expect(readonly.contains(id));
+    try expect(@TypeOf(readonly.get(id)) == ?*const Entity);
+    try expect(readonly.get(id).? == registry.getMut(id).?);
 
     try expectEqual(1, registry.entities.items.len);
     try expectEqual(1, registry.arche_reg.entries.items.len);
@@ -399,9 +519,16 @@ test "addBundle accepts an empty bundle and get rejects unknown ids" {
     const archetype = registry.arche_reg.getById(entity.archetype_id).?;
     try expectEqual(0, archetype.meta.columns.items.len);
     try expectEqual(1, archetype.len());
-    try expect(registry.get(EntityId.init(id.index.get(), id.generation.next().get())) == null);
-    try expect(registry.get(EntityId.init(1, 0)) == null);
-    try expect(registry.get(EntityId.invalid) == null);
+    for ([_]EntityId{
+        .invalid,
+        .{ .index = id.index },
+        EntityId.init(1, 0),
+        EntityId.init(id.index.get(), 1),
+    }) |invalid| {
+        try expect(!readonly.contains(invalid));
+        try expect(readonly.get(invalid) == null);
+        try expect(registry.getMut(invalid) == null);
+    }
 }
 
 test "addBundle reuses a retired entity slot" {
@@ -419,16 +546,27 @@ test "addBundle reuses a retired entity slot" {
         first.generation.next().get(),
     );
 
-    const slot = registry.get(first).?;
+    const slot = registry.getMut(first).?;
     slot.deinit(allocator);
     slot.id = EntityId.invalid;
     try registry.retired.append(allocator, retired_id);
+    try expectEqual(0, registry.len());
+    try expect(registry.isEmpty());
+    try expect(!registry.contains(first));
+    try expect(registry.getMut(first) == null);
+    try expect(!registry.contains(retired_id));
 
     const second = try registry.addBundle(try .init(allocator, .{
         Position{ .x = 3, .y = 4 },
     }));
 
     try expect(second.eql(retired_id));
+    try expectEqual(1, registry.len());
+    try expect(!registry.isEmpty());
+    try expect(registry.contains(second));
+    try expect(!registry.contains(first));
+    try expect(registry.getComponent(first, position_id) == null);
+    try expect(registry.getComponentMut(first, position_id) == null);
     try expectEqual(0, registry.retired.items.len);
     try expectEqual(1, registry.entities.items.len);
 
