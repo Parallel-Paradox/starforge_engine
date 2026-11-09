@@ -114,7 +114,35 @@ pub fn typedAt(self: @This(), T: type, column: usize, row: usize) struct { ptr: 
     };
 }
 
-/// Returns an iterator over the live entities, in the order they were added.
+/// Destroys `row` and fills its slot with the last entity without destroying
+/// the moved values. Returns that entity's id, or null if `row` was last.
+/// Retains all chunks and their buffers. Asserts that `row` is live.
+pub fn swapRemove(self: *@This(), row: usize) ?EntityId {
+    std.debug.assert(row < self.len());
+    const last = self.len() - 1;
+    const per_chunk = self.layout.capacity;
+    const removed_chunk = &self.chunks.items[row / per_chunk];
+    const last_chunk = &self.chunks.items[last / per_chunk];
+
+    for (self.meta.columns.items, self.layout.column_offsets.items) |column, offset| {
+        const removed_ptr = removed_chunk.ptr + offset + (row % per_chunk) * column.meta.size;
+        switch (column.meta.need_deinit) {
+            .trivial => {},
+            .managed => |deinit_fn| deinit_fn(@ptrCast(removed_ptr)),
+        }
+        if (row != last and column.meta.size != 0) {
+            const last_ptr = last_chunk.ptr + offset + (last % per_chunk) * column.meta.size;
+            @memcpy(removed_ptr[0..column.meta.size], last_ptr[0..column.meta.size]);
+        }
+    }
+
+    const moved = if (row != last) self.ids.items[last] else null;
+    _ = self.ids.swapRemove(row);
+    last_chunk.len -= 1;
+    return moved;
+}
+
+/// Returns an iterator over the live entities, in dense storage order.
 pub fn iter(self: *@This()) Iter {
     return .{ .archetype = self };
 }
@@ -519,4 +547,179 @@ test "at locates a column value and id across chunks" {
     try expectEqual(0xAA, arch.chunks.items[0].ptr[0]);
     try expectEqual(0xCC, arch.chunks.items[0].ptr[@sizeOf(Half)]);
     try expectEqual(0xBB, arch.chunks.items[1].ptr[0]);
+}
+
+test "swapRemove moves every column and retains storage through the last removal" {
+    const allocator = std.testing.allocator;
+    const Narrow = struct {
+        pub const se_component: CompMark = .{};
+        value: u32,
+    };
+
+    var registry = CompRegistry.init(allocator);
+    defer registry.deinit();
+    const wide = try registry.register(Wide);
+    const narrow = try registry.register(Narrow);
+    var arch = try init(allocator, &.{ wide, narrow }, registry);
+    defer arch.deinit();
+    try arch.reserve(3);
+
+    for (0..3) |index| {
+        arch.ids.appendAssumeCapacity(EntityId.init(@intCast(index), 7));
+        arch.typedAt(Wide, 0, index).ptr.* = .{ .value = 10 + index };
+        arch.typedAt(Narrow, 1, index).ptr.* = .{ .value = @intCast(20 + index) };
+        arch.chunks.items[0].len += 1;
+    }
+    const old_capacity = arch.capacity();
+    const old_ids_capacity = arch.ids.capacity;
+    const old_ptr = arch.chunks.items[0].ptr;
+
+    try expect(arch.swapRemove(1).?.eql(EntityId.init(2, 7)));
+    try expectEqual(2, arch.len());
+    try expectEqual(2, arch.chunks.items[0].len);
+    try expectEqual(10, arch.typedAt(Wide, 0, 0).ptr.value);
+    try expectEqual(12, arch.typedAt(Wide, 0, 1).ptr.value);
+    try expectEqual(22, arch.typedAt(Narrow, 1, 1).ptr.value);
+    try expect(arch.ids.items[1].eql(EntityId.init(2, 7)));
+
+    try expect(arch.swapRemove(1) == null);
+    try expectEqual(1, arch.len());
+    try expect(arch.swapRemove(0) == null);
+    try expectEqual(0, arch.len());
+    try expectEqual(0, arch.chunks.items[0].len);
+    try expectEqual(old_capacity, arch.capacity());
+    try expectEqual(old_ids_capacity, arch.ids.capacity);
+    try expectEqual(1, arch.chunks.items.len);
+    try expectEqual(old_ptr, arch.chunks.items[0].ptr);
+}
+
+test "swapRemove across chunks destroys each managed column exactly once" {
+    const allocator = std.testing.allocator;
+    const Large = struct {
+        pub const se_component: CompMark = .{};
+        calls: *usize,
+        bytes: [Layout.max_size_byte / 2 - 2 * @sizeOf(*usize)]u8,
+
+        pub fn deinit(self: *@This()) void {
+            self.calls.* += 1;
+        }
+    };
+    const Other = struct {
+        pub const se_component: CompMark = .{};
+        calls: *usize,
+
+        pub fn deinit(self: *@This()) void {
+            self.calls.* += 1;
+        }
+    };
+
+    var registry = CompRegistry.init(allocator);
+    defer registry.deinit();
+    const large = try registry.register(Large);
+    const other = try registry.register(Other);
+    var large_calls = [_]usize{ 0, 0, 0 };
+    var other_calls = [_]usize{ 0, 0, 0 };
+    {
+        var arch = try init(allocator, &.{ large, other }, registry);
+        defer arch.deinit();
+        // Two entities fit per chunk; retain a third, entirely unused chunk too.
+        try arch.reserve(5);
+        try expectEqual(2, arch.layout.capacity);
+        try expectEqual(3, arch.chunks.items.len);
+        const large_column = arch.meta.id_to_col.get(TypeId.of(Large)).?;
+        const other_column = arch.meta.id_to_col.get(TypeId.of(Other)).?;
+        for (0..3) |index| {
+            arch.ids.appendAssumeCapacity(EntityId.init(@intCast(index), 1));
+            const value = arch.typedAt(Large, large_column, index).ptr;
+            value.calls = &large_calls[index];
+            @memset(&value.bytes, @intCast(index + 10));
+            arch.typedAt(Other, other_column, index).ptr.* = .{ .calls = &other_calls[index] };
+            arch.chunks.items[index / arch.layout.capacity].len += 1;
+        }
+        const old_capacity = arch.capacity();
+        const old_ptrs = [_][*]u8{
+            arch.chunks.items[0].ptr,
+            arch.chunks.items[1].ptr,
+            arch.chunks.items[2].ptr,
+        };
+
+        try expect(arch.swapRemove(0).?.eql(EntityId.init(2, 1)));
+        try expectEqual(2, arch.len());
+        try expectEqual(2, arch.chunks.items[0].len);
+        try expectEqual(0, arch.chunks.items[1].len);
+        try expectEqual(0, arch.chunks.items[2].len);
+        try expectEqual([_]usize{ 1, 0, 0 }, large_calls);
+        try expectEqual([_]usize{ 1, 0, 0 }, other_calls);
+        const moved = arch.typedAt(Large, large_column, 0);
+        try expect(moved.id.eql(EntityId.init(2, 1)));
+        try expectEqual(&large_calls[2], moved.ptr.calls);
+        for (moved.ptr.bytes) |byte| try expectEqual(12, byte);
+        try expectEqual(&other_calls[2], arch.typedAt(Other, other_column, 0).ptr.calls);
+
+        try expect(arch.swapRemove(1) == null);
+        try expectEqual(1, arch.chunks.items[0].len);
+        try expectEqual([_]usize{ 1, 1, 0 }, large_calls);
+        try expectEqual([_]usize{ 1, 1, 0 }, other_calls);
+        try expectEqual(old_capacity, arch.capacity());
+        try expectEqual(3, arch.chunks.items.len);
+        for (arch.chunks.items, old_ptrs) |chunk, ptr| try expectEqual(ptr, chunk.ptr);
+    }
+    // Teardown owns only the moved survivor, not its old bytes in the empty chunk.
+    try expectEqual([_]usize{ 1, 1, 1 }, large_calls);
+    try expectEqual([_]usize{ 1, 1, 1 }, other_calls);
+}
+
+test "swapRemove supports a component-free archetype" {
+    const allocator = std.testing.allocator;
+    var registry = CompRegistry.init(allocator);
+    defer registry.deinit();
+    var arch = try init(allocator, &.{}, registry);
+    defer arch.deinit();
+    try arch.reserve(2);
+    arch.ids.appendAssumeCapacity(EntityId.init(4, 1));
+    arch.ids.appendAssumeCapacity(EntityId.init(5, 1));
+    arch.chunks.items[0].len = 2;
+
+    try expect(arch.swapRemove(0).?.eql(EntityId.init(5, 1)));
+    try expect(arch.ids.items[0].eql(EntityId.init(5, 1)));
+    try expectEqual(1, arch.chunks.items[0].len);
+    try expect(arch.swapRemove(0) == null);
+    try expectEqual(0, arch.len());
+    try expectEqual(0, arch.chunks.items[0].len);
+    try expectEqual(2, arch.capacity());
+}
+
+test "swapRemove destroys zero-sized managed values once including teardown" {
+    const allocator = std.testing.allocator;
+    const ManagedTag = struct {
+        pub const se_component: CompMark = .{};
+        var calls: usize = 0;
+
+        pub fn deinit(_: *@This()) void {
+            calls += 1;
+        }
+    };
+    ManagedTag.calls = 0;
+    try expectEqual(0, @sizeOf(ManagedTag));
+    var registry = CompRegistry.init(allocator);
+    defer registry.deinit();
+    const tag = try registry.register(ManagedTag);
+    {
+        var arch = try init(allocator, &.{tag}, registry);
+        defer arch.deinit();
+        try arch.reserve(3);
+        for (0..3) |index| {
+            arch.ids.appendAssumeCapacity(EntityId.init(@intCast(index), 1));
+        }
+        arch.chunks.items[0].len = 3;
+        try expectEqual(0, arch.layout.size);
+
+        try expect(arch.swapRemove(1).?.eql(EntityId.init(2, 1)));
+        try expectEqual(1, ManagedTag.calls);
+        try expectEqual(2, arch.chunks.items[0].len);
+        try expect(arch.swapRemove(1) == null);
+        try expectEqual(2, ManagedTag.calls);
+        try expectEqual(1, arch.chunks.items[0].len);
+    }
+    try expectEqual(3, ManagedTag.calls);
 }

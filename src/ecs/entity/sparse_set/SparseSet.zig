@@ -48,6 +48,30 @@ pub fn get(self: @This(), comptime T: type, id: EntityId) ?*T {
     return @ptrCast(@alignCast(bytes.ptr));
 }
 
+/// Destroys the value for the full entity id and fills its slot with the last
+/// value without destroying it. Returns false if absent; retains all capacity.
+pub fn remove(self: *@This(), id: EntityId) bool {
+    const row = self.denseIndex(id) orelse return false;
+    const last = self.len() - 1;
+    const removed_ptr = self.ptr + row * self.meta.size;
+    switch (self.meta.need_deinit) {
+        .trivial => {},
+        .managed => |deinit_fn| deinit_fn(@ptrCast(removed_ptr)),
+    }
+
+    if (row != last) {
+        if (self.meta.size != 0) {
+            const last_ptr = self.ptr + last * self.meta.size;
+            @memcpy(removed_ptr[0..self.meta.size], last_ptr[0..self.meta.size]);
+        }
+        const moved = self.entity_ids.items[last];
+        self.sparse_to_dense.items[moved.index.get()] = .from(@intCast(row));
+    }
+    _ = self.entity_ids.swapRemove(row);
+    self.sparse_to_dense.items[id.index.get()] = .invalid;
+    return true;
+}
+
 /// Returns the dense row holding `id`, or null if the set lacks it.
 fn denseIndex(self: @This(), id: EntityId) ?usize {
     const index = id.index.tryGet() orelse return null;
@@ -304,4 +328,121 @@ test "get returns the value for an entity and null when absent" {
     try expect(set.get(u32, EntityId.init(0, 2)) == null);
     try expect(set.get(u32, EntityId.init(2, 1)) == null);
     try expect(set.getBytes(EntityId.init(1, 1)) == null);
+}
+
+test "remove validates generations, repairs mappings, and retains capacity" {
+    const allocator = std.testing.allocator;
+    var set = try initWithCapacity(allocator, TypeMeta.of(u32), 4);
+    defer set.deinit();
+    try set.sparse_to_dense.resize(allocator, 7);
+    @memset(set.sparse_to_dense.items, .invalid);
+    const ids = [_]EntityId{ EntityId.init(2, 3), EntityId.init(5, 7), EntityId.init(1, 9) };
+    const values: [*]u32 = @ptrCast(@alignCast(set.ptr));
+    for (ids, 0..) |id, row| {
+        set.entity_ids.appendAssumeCapacity(id);
+        set.sparse_to_dense.items[id.index.get()] = .from(@intCast(row));
+        values[row] = @intCast(10 + row);
+    }
+    const old_ptr = set.ptr;
+    const old_sparse_ptr = set.sparse_to_dense.items.ptr;
+    const old_sparse_capacity = set.sparse_to_dense.capacity;
+    const old_ids_ptr = set.entity_ids.items.ptr;
+
+    try expect(!set.remove(EntityId.init(5, 6)));
+    try expect(!set.remove(EntityId.init(6, 1)));
+    try expect(!set.remove(EntityId.init(7, 1)));
+    try expect(!set.remove(.invalid));
+    try expect(!set.remove(.{ .index = .from(5) }));
+    try expectEqual(3, set.len());
+
+    try expect(set.remove(ids[1]));
+    try expectEqual(2, set.len());
+    try expectEqual(10, set.get(u32, ids[0]).?.*);
+    try expectEqual(12, set.get(u32, ids[2]).?.*);
+    try expect(set.entity_ids.items[1].eql(ids[2]));
+    try expectEqual(DenseId.from(1), set.sparse_to_dense.items[1]);
+    try expectEqual(DenseId.invalid, set.sparse_to_dense.items[5]);
+    try expect(set.getBytes(ids[1]) == null);
+    try expect(!set.remove(ids[1]));
+
+    try expect(set.remove(ids[2]));
+    try expectEqual(1, set.len());
+    try expectEqual(DenseId.invalid, set.sparse_to_dense.items[1]);
+    try expectEqual(DenseId.from(0), set.sparse_to_dense.items[2]);
+    try expect(set.remove(ids[0]));
+    try expectEqual(0, set.len());
+    try expectEqual(DenseId.invalid, set.sparse_to_dense.items[2]);
+    try expect(!set.remove(ids[0]));
+    try expectEqual(4, set.capacity());
+    try expectEqual(old_ptr, set.ptr);
+    try expectEqual(old_ids_ptr, set.entity_ids.items.ptr);
+    try expectEqual(old_sparse_ptr, set.sparse_to_dense.items.ptr);
+    try expectEqual(old_sparse_capacity, set.sparse_to_dense.capacity);
+    try expectEqual(7, set.sparse_to_dense.items.len);
+}
+
+test "remove destroys managed values exactly once including teardown" {
+    const allocator = std.testing.allocator;
+    const Managed = struct {
+        calls: *usize,
+
+        pub fn deinit(self: *@This()) void {
+            self.calls.* += 1;
+        }
+    };
+    var calls = [_]usize{ 0, 0, 0 };
+    {
+        var set = try initWithCapacity(allocator, TypeMeta.of(Managed), 3);
+        defer set.deinit();
+        try set.sparse_to_dense.resize(allocator, 3);
+        for (0..3) |row| {
+            set.entity_ids.appendAssumeCapacity(EntityId.init(@intCast(row), 1));
+            set.sparse_to_dense.items[row] = .from(@intCast(row));
+            const value: *Managed = @ptrCast(@alignCast(set.ptr + row * @sizeOf(Managed)));
+            value.* = .{ .calls = &calls[row] };
+        }
+
+        try expect(!set.remove(EntityId.init(1, 2)));
+        try expectEqual([_]usize{ 0, 0, 0 }, calls);
+        try expect(set.remove(EntityId.init(1, 1)));
+        try expectEqual([_]usize{ 0, 1, 0 }, calls);
+        try expectEqual(&calls[2], set.get(Managed, EntityId.init(2, 1)).?.calls);
+        try expect(!set.remove(EntityId.init(1, 1)));
+        try expectEqual([_]usize{ 0, 1, 0 }, calls);
+        try expect(set.remove(EntityId.init(2, 1)));
+        try expectEqual([_]usize{ 0, 1, 1 }, calls);
+    }
+    try expectEqual([_]usize{ 1, 1, 1 }, calls);
+}
+
+test "remove destroys zero-sized managed values once including teardown" {
+    const allocator = std.testing.allocator;
+    const ManagedTag = struct {
+        var calls: usize = 0;
+
+        pub fn deinit(_: *@This()) void {
+            calls += 1;
+        }
+    };
+    ManagedTag.calls = 0;
+    try expectEqual(0, @sizeOf(ManagedTag));
+    {
+        var set = try initWithCapacity(allocator, TypeMeta.of(ManagedTag), 3);
+        defer set.deinit();
+        try set.sparse_to_dense.resize(allocator, 3);
+        for (0..3) |row| {
+            set.entity_ids.appendAssumeCapacity(EntityId.init(@intCast(row), 1));
+            set.sparse_to_dense.items[row] = .from(@intCast(row));
+        }
+        const old_ptr = set.ptr;
+        try expect(set.remove(EntityId.init(1, 1)));
+        try expectEqual(1, ManagedTag.calls);
+        try expectEqual(DenseId.from(1), set.sparse_to_dense.items[2]);
+        try expect(set.get(ManagedTag, EntityId.init(2, 1)) != null);
+        try expect(set.remove(EntityId.init(2, 1)));
+        try expectEqual(2, ManagedTag.calls);
+        try expectEqual(old_ptr, set.ptr);
+        try expectEqual(3, set.capacity());
+    }
+    try expectEqual(3, ManagedTag.calls);
 }

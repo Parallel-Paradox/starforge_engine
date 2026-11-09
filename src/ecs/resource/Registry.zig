@@ -99,7 +99,7 @@ pub fn insertParcel(self: *@This(), parcel: Parcel) Allocator.Error!ResId {
         return id;
     }
 
-    const id = ResId.init(@intCast(self.entries.items.len), 0);
+    const id = ResId.init(self.entries.items.len, 0);
     try self.entries.ensureUnusedCapacity(self.allocator, 1);
     try self.type_to_id.ensureUnusedCapacity(self.allocator, 1);
     // Every slot may be retired; reserving here keeps removal allocation-free.
@@ -201,10 +201,7 @@ pub fn takeByResId(self: *@This(), id: ResId) ?Parcel {
     const parcel = entry.parcel;
     _ = self.type_to_id.remove(parcel.meta.id);
     entry.* = .{};
-    self.retired.appendAssumeCapacity(.{
-        .index = id.index,
-        .generation = id.generation.next(),
-    });
+    self.retired.appendAssumeCapacity(id.nextGeneration());
     return parcel;
 }
 

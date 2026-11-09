@@ -123,7 +123,7 @@ pub fn getOrCreate(
     const id = if (reuse)
         self.retired.getLast()
     else
-        ArchetypeId.init(@intCast(self.entries.items.len), 0);
+        ArchetypeId.init(self.entries.items.len, 0);
     if (reuse) _ = self.retired.pop();
 
     const entry: Entry = .{ .id = id, .archetype = arch };
@@ -160,10 +160,7 @@ pub fn remove(self: *@This(), id: ArchetypeId) Allocator.Error!void {
     // An invalid id no longer matches the logged change, which marks this slot as a
     // removal for change-log consumers, and lets `deinit` skip the freed archetype.
     entry.id = .invalid;
-    self.retired.appendAssumeCapacity(.{
-        .index = id.index,
-        .generation = id.generation.next(),
-    });
+    self.retired.appendAssumeCapacity(id.nextGeneration());
 
     self.change_log.record(id);
 }

@@ -4,6 +4,7 @@ const std = @import("std");
 
 const engine = @import("engine");
 const NonMax = engine.base.niche.NonMax;
+const Tracer = engine.trace.Tracer.Global;
 
 pub const invalid = @This(){};
 
@@ -13,9 +14,23 @@ pub const Generation = NonMax(u32);
 index: Index = .invalid,
 generation: Generation = .invalid,
 
-/// Builds an id from raw values. Asserts (in safe build modes) that neither value is `maxInt(u32)`.
-pub fn init(index: u32, generation: u32) @This() {
-    return .{ .index = .from(index), .generation = .from(generation) };
+/// Builds an id from raw values. Panics in every build mode if `index` exceeds
+/// the largest valid index (`maxInt(u32) - 1`). The generation must be valid.
+pub fn init(index: usize, generation: u32) @This() {
+    if (index >= std.math.maxInt(u32)) @panic("ECS id index exhausted");
+    return .{ .index = .from(@intCast(index)), .generation = .from(generation) };
+}
+
+/// Returns the same index with its generation incremented. Requires a valid id.
+/// Wraps to zero, skipping the invalid sentinel, and warns that old ids may alias.
+pub fn nextGeneration(self: @This()) @This() {
+    std.debug.assert(self.isValid());
+    const generation = self.generation.get();
+    if (generation == std.math.maxInt(u32) - 1) {
+        Tracer.warn("ECS id generation exhausted; wrapping to zero may revive stale ids").emit();
+        return .{ .index = self.index, .generation = .from(0) };
+    }
+    return .{ .index = self.index, .generation = .from(generation + 1) };
 }
 
 /// Whether both the index and the generation match.
@@ -69,6 +84,21 @@ test "id with only an invalid generation reports it" {
 
     try expectError(ValidateError.InvalidGeneration, id.validate());
     try expect(!id.isValid());
+}
+
+test "init accepts the largest valid index" {
+    const id = init(std.math.maxInt(u32) - 1, 0);
+    try expectEqual(std.math.maxInt(u32) - 1, id.index.get());
+    try expect(id.isValid());
+}
+
+test "nextGeneration preserves the index and skips the invalid sentinel on wrap" {
+    try expect(init(3, 7).nextGeneration().eql(init(3, 8)));
+    const last = init(3, std.math.maxInt(u32) - 1);
+    const wrapped = last.nextGeneration();
+    try expect(wrapped.eql(init(3, 0)));
+    try expect(wrapped.isValid());
+    try expect(wrapped.nextGeneration().eql(init(3, 1)));
 }
 
 test "id built from raw values is valid" {

@@ -105,6 +105,14 @@ pub fn addEntity(
     return self.entity_reg.addBundle(bundle);
 }
 
+/// Destroys the entity and its components, returning whether it was live.
+/// Unknown, stale, or already removed ids return false. Allocation failure
+/// leaves the entity unchanged. Invalidates affected component borrows and
+/// active query iterators; do not call during query iteration.
+pub fn removeEntity(self: *@This(), id: EntityId) Allocator.Error!bool {
+    return self.entity_reg.remove(id);
+}
+
 /// Returns whether `id` identifies a live entity.
 pub fn containsEntity(self: *const @This(), id: EntityId) bool {
     return self.entity_reg.contains(id);

@@ -75,7 +75,7 @@ pub fn getOrCreate(self: *@This(), meta: TypeMeta) Allocator.Error!*Entry {
     const id = if (reuse)
         self.retired.getLast()
     else
-        SparseSetId.init(@intCast(self.entries.items.len), 0);
+        SparseSetId.init(self.entries.items.len, 0);
     if (reuse) _ = self.retired.pop();
 
     const entry: Entry = .{ .id = id, .set = set };

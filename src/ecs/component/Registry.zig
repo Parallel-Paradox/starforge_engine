@@ -116,7 +116,7 @@ pub fn reserve(self: *@This(), type_id: TypeId) Allocator.Error!CompId {
         return id;
     }
 
-    const id = CompId.init(@intCast(self.entries.items.len), 0);
+    const id = CompId.init(self.entries.items.len, 0);
     try self.entries.ensureUnusedCapacity(self.allocator, 1);
     try self.type_to_id.ensureUnusedCapacity(self.allocator, 1);
 
@@ -174,10 +174,7 @@ pub fn unregister(self: *@This(), type_id: TypeId) UnregisterError!void {
     _ = self.type_to_id.remove(type_id);
     self.entries.items[id.index.get()].meta.deinit(self.allocator);
     self.entries.items[id.index.get()] = .{};
-    self.retired.appendAssumeCapacity(.{
-        .index = id.index,
-        .generation = id.generation.next(),
-    });
+    self.retired.appendAssumeCapacity(id.nextGeneration());
 }
 
 /// Returns the component id registered or reserved for `T`, or null if unknown.

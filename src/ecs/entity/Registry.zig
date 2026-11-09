@@ -80,6 +80,31 @@ pub fn getMut(self: *@This(), id: EntityId) ?*Entity {
     return &self.entities.items[index];
 }
 
+/// Destroys a live entity and retires its next-generation id for reuse.
+/// Returns false for unknown, stale, or retired ids. On allocation failure,
+/// the entity and its components are unchanged. Retains component storage.
+/// Invalidates borrows of removed or moved values and active storage iterators.
+pub fn remove(self: *@This(), id: EntityId) Allocator.Error!bool {
+    const index = self.entityIndex(id) orelse return false;
+    try self.retired.ensureUnusedCapacity(self.allocator, 1);
+
+    const entity = &self.entities.items[index];
+    const row = entity.archetype_row;
+    const archetype = self.arche_reg.getById(entity.archetype_id).?;
+    if (archetype.swapRemove(row)) |moved| {
+        self.getMut(moved).?.archetype_row = row;
+    }
+    for (entity.sparse_comps.items) |set_id| {
+        const removed = self.sparse_reg.getById(set_id).?.remove(id);
+        std.debug.assert(removed);
+    }
+
+    entity.deinit(self.allocator);
+    entity.* = Entity.init(self.allocator, .invalid);
+    self.retired.appendAssumeCapacity(id.nextGeneration());
+    return true;
+}
+
 fn entityIndex(self: *const @This(), id: EntityId) ?usize {
     const index = id.index.tryGet() orelse return null;
     if (index >= self.entities.items.len) return null;
@@ -271,7 +296,7 @@ fn createEntity(
     const id = if (self.retired.items.len != 0)
         self.retired.getLast()
     else
-        EntityId.init(@intCast(self.entities.items.len), 0);
+        EntityId.init(self.entities.items.len, 0);
     try self.entities.ensureTotalCapacity(allocator, id.index.get() + 1);
 
     var entity = Entity.init(allocator, id);
@@ -529,54 +554,70 @@ test "empty entity access reports metadata and rejects invalid ids" {
         try expect(readonly.get(invalid) == null);
         try expect(registry.getMut(invalid) == null);
     }
+    try expect(try registry.remove(id));
+    try expect(readonly.isEmpty());
+    try expectEqual(0, archetype.len());
 }
 
-test "addBundle reuses a retired entity slot" {
+test "remove repairs storage, destroys values once, and retires ids for reuse" {
+    const SparseProbe = struct {
+        pub const se_component: TestMark = .{ .storage = .sparse_set };
+        calls: *usize,
+
+        pub fn deinit(self: *@This()) void {
+            self.calls.* += 1;
+        }
+    };
     const allocator = std.testing.allocator;
-    var registry = init(allocator);
-    defer registry.deinit();
-    _ = try registry.comp_reg.register(Position);
-    const position_id = registry.comp_reg.idOf(Position).?;
+    var archetype_calls: usize = 0;
+    var sparse_calls: usize = 0;
+    {
+        var registry = init(allocator);
+        defer registry.deinit();
+        inline for (.{ Position, Probe, SparseProbe }) |T| _ = try registry.comp_reg.register(T);
+        var ids: [2]EntityId = undefined;
+        for (&ids, 0..) |*id, i| {
+            id.* = try registry.addBundle(try .init(allocator, .{
+                Position{ .x = @intCast(i), .y = 4 },
+                Probe{ .calls = &archetype_calls },
+                SparseProbe{ .calls = &sparse_calls },
+            }));
+        }
+        // The last sparse value belongs to a different archetype.
+        const sparse_only = try registry.addBundle(
+            try .init(allocator, .{SparseProbe{ .calls = &sparse_calls }}),
+        );
+        try expect(try registry.remove(ids[0]));
+        try expectEqual(1, archetype_calls);
+        try expectEqual(1, sparse_calls);
+        try expectEqual(2, registry.len());
+        for ([_]EntityId{
+            ids[0],
+            ids[0].nextGeneration(),
+            .invalid,
+            EntityId.init(100, 0),
+        }) |invalid|
+            try expect(!try registry.remove(invalid));
 
-    const first = try registry.addBundle(try .init(allocator, .{
-        Position{ .x = 1, .y = 2 },
-    }));
-    const retired_id = EntityId.init(
-        first.index.get(),
-        first.generation.next().get(),
-    );
+        const moved = registry.get(ids[1]).?;
+        try expectEqual(0, moved.archetype_row);
+        const archetype = registry.arche_reg.getById(moved.archetype_id).?;
+        try expectEqual(1, archetype.len());
+        try expectArchetypeValue(archetype, Position, 0, .{ .x = 1, .y = 4 });
+        const set = &registry.sparse_reg.getByTypeId(TypeId.of(SparseProbe)).?.set;
+        try expectEqual(2, set.len());
+        try expect(set.get(SparseProbe, ids[1]) != null);
+        try expect(set.get(SparseProbe, sparse_only) != null);
 
-    const slot = registry.getMut(first).?;
-    slot.deinit(allocator);
-    slot.id = EntityId.invalid;
-    try registry.retired.append(allocator, retired_id);
-    try expectEqual(0, registry.len());
-    try expect(registry.isEmpty());
-    try expect(!registry.contains(first));
-    try expect(registry.getMut(first) == null);
-    try expect(!registry.contains(retired_id));
-
-    const second = try registry.addBundle(try .init(allocator, .{
-        Position{ .x = 3, .y = 4 },
-    }));
-
-    try expect(second.eql(retired_id));
-    try expectEqual(1, registry.len());
-    try expect(!registry.isEmpty());
-    try expect(registry.contains(second));
-    try expect(!registry.contains(first));
-    try expect(registry.getComponent(first, position_id) == null);
-    try expect(registry.getComponentMut(first, position_id) == null);
-    try expectEqual(0, registry.retired.items.len);
-    try expectEqual(1, registry.entities.items.len);
-
-    const entity = registry.get(second).?;
-    try expect(entity.id.eql(retired_id));
-    try expect(entity.signature.has(position_id));
-    try expectEqual(1, entity.archetype_row);
-
-    const archetype = registry.arche_reg.getById(entity.archetype_id).?;
-    try expectArchetypeValue(archetype, Position, 1, .{ .x = 3, .y = 4 });
+        const reused = try registry.addBundle(try .init(allocator, .{}));
+        try expect(reused.eql(ids[0].nextGeneration()));
+        try expect(registry.contains(reused));
+        try expect(!try registry.remove(ids[0]));
+        try expectEqual(3, registry.entities.items.len);
+        try expectEqual(0, registry.retired.items.len);
+    }
+    try expectEqual(2, archetype_calls);
+    try expectEqual(3, sparse_calls);
 }
 
 const RequirementGraph = struct {
@@ -802,4 +843,35 @@ fn testRequirementAllocationFailures(allocator: Allocator) !void {
 
 test "addBundle preserves input and cleans generated values on every allocation failure" {
     try checkAllAllocationFailures(std.testing.allocator, testRequirementAllocationFailures, .{});
+}
+
+test "remove allocation failure preserves the entity and all component values" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var calls: usize = 0;
+    var registry = init(allocator);
+    defer registry.deinit();
+    inline for (.{ Probe, Health }) |T| _ = try registry.comp_reg.register(T);
+    const id = try registry.addBundle(try .init(allocator, .{
+        Probe{ .calls = &calls }, Health{ .value = 17 },
+    }));
+    const archetype = registry.arche_reg.getById(registry.get(id).?.archetype_id).?;
+
+    // Only retirement allocation fails; existing allocations still use the same backing allocator.
+    registry.allocator = failing.allocator();
+    try expect(!try registry.remove(.invalid));
+    try expectError(error.OutOfMemory, registry.remove(id));
+    try expectEqual(0, calls);
+    try expect(registry.contains(id));
+    try expectEqual(1, registry.len());
+    try expectEqual(1, archetype.len());
+    try expectEqual(0, registry.get(id).?.archetype_row);
+    const set = &registry.sparse_reg.getByTypeId(TypeId.of(Health)).?.set;
+    try expectEqual(17, set.get(Health, id).?.value);
+
+    registry.allocator = allocator;
+    try expect(try registry.remove(id));
+    try expectEqual(1, calls);
+    try expect(registry.isEmpty());
+    try expectEqual(0, archetype.len());
 }
