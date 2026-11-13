@@ -159,10 +159,10 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
                         @field(result, name) = @ptrCast(@alignCast(bytes.ptr));
                     } else {
                         const set = iter.sparseSet(i) orelse return null;
-                        @field(result, name) = set.get(T, entity_item.id) orelse return null;
+                        @field(result, name) = set.get(T, entity_item.id.*) orelse return null;
                     }
                 } else {
-                    @field(result, name) = entity_item.id;
+                    @field(result, name) = entity_item.id.*;
                 }
             }
             return result;

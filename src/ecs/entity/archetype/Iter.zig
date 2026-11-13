@@ -1,4 +1,4 @@
-//! Iterates the live entities of an archetype, one entity at a time.
+//! Iterates the entity slots of an archetype, one entity at a time.
 
 const std = @import("std");
 
@@ -15,18 +15,16 @@ chunk_index: usize = 0,
 /// Row of the next entity inside `chunk_index`.
 row_in_chunk: usize = 0,
 
-/// An entity yielded by `next`, with access to its component columns.
-///
-/// The position is snapshotted when the item is yielded, so it keeps addressing
-/// the same entity after the iterator has advanced.
+/// A slot with access to its component columns and id. Unused slots must be
+/// initialized before reading. Storage growth or row removal invalidates the item.
 pub const Item = struct {
-    id: EntityId,
+    id: *EntityId,
     /// Index of the chunk holding this entity.
     chunk_index: usize,
     /// Row of this entity inside `chunk_index`.
     row_in_chunk: usize,
     /// The archetype holding this entity.
-    archetype: *const Archetype,
+    archetype: *Archetype,
 
     /// Returns the bytes of column `val` for this entity.
     ///
@@ -45,12 +43,18 @@ pub const Item = struct {
     }
 };
 
-/// Returns the next live entity, or null once the archetype is exhausted.
+/// Returns the next live entity, or null once the live entities are exhausted.
 pub fn next(self: *@This()) ?Item {
     if (self.row >= self.archetype.len()) return null;
+    return self.nextStorage();
+}
+
+/// Returns the next allocated slot, bounded by capacity.
+pub fn nextStorage(self: *@This()) ?Item {
+    if (self.row >= self.archetype.capacity()) return null;
 
     const item: Item = .{
-        .id = self.archetype.ids.items[self.row],
+        .id = &self.archetype.ids.allocatedSlice()[self.row],
         .chunk_index = self.chunk_index,
         .row_in_chunk = self.row_in_chunk,
         .archetype = self.archetype,
@@ -74,7 +78,7 @@ pub fn get(self: @This()) Item {
     std.debug.assert(self.row < self.archetype.len());
 
     return .{
-        .id = self.archetype.ids.items[self.row],
+        .id = &self.archetype.ids.items[self.row],
         .chunk_index = self.chunk_index,
         .row_in_chunk = self.row_in_chunk,
         .archetype = self.archetype,
@@ -110,9 +114,17 @@ test "next returns null for an empty archetype" {
 
     var it = arch.iter();
     try expect(it.next() == null);
+    try expect(it.nextStorage() == null);
+
+    try arch.reserve(1);
+    var unused = arch.iterUnused();
+    unused.nextStorage().?.id.* = EntityId.init(0, 1);
+    try expect(unused.nextStorage() == null);
+    try expectEqual(0, arch.len());
+    try expectEqual(0, arch.chunks.items[0].len);
 }
 
-test "iter visits every entity across chunks and exposes its columns" {
+test "iter visits live and unused slots across chunks and exposes their columns" {
     const allocator = std.testing.allocator;
 
     var registry = CompRegistry.init(allocator);
@@ -123,14 +135,42 @@ test "iter visits every entity across chunks and exposes its columns" {
     var arch = try Archetype.init(allocator, &.{ small, big }, registry);
     defer arch.deinit();
 
+    // Component capacity grows to four, but only three ids have storage.
+    try arch.ids.ensureTotalCapacityPrecise(allocator, 3);
     try arch.reserve(3);
     try expectEqual(2, arch.layout.capacity);
     try expectEqual(2, arch.chunks.items.len);
+    try expectEqual(3, arch.ids.capacity);
+    try expectEqual(3, arch.capacity());
 
-    for (0..3) |index| {
-        try arch.ids.append(allocator, EntityId.init(@intCast(index), 1));
+    _ = arch.appendUninitAssumeCapacity(EntityId.init(0, 1));
+    @memset(arch.at(0, 0).data, 0);
+    @memset(arch.at(1, 0).data, 0);
+    var unused = arch.iterUnused();
+    try expect(unused.next() == null);
+    var filled: usize = 1;
+    while (unused.nextStorage()) |item| : (filled += 1) {
+        try expectEqual(filled / 2, item.chunk_index);
+        try expectEqual(filled % 2, item.row_in_chunk);
+        try expectEqual(&arch.ids.allocatedSlice()[filled], item.id);
+        item.id.* = EntityId.init(@intCast(filled), 1);
+        @memset(item.column(0), 0);
+        @memset(item.column(1), 0);
     }
+    try expectEqual(3, filled);
+    try expect(unused.nextStorage() == null);
+    try expectEqual(1, arch.len());
+    try expectEqual(1, arch.chunks.items[0].len);
+    try expectEqual(0, arch.chunks.items[1].len);
+
+    arch.ids.items.len = 2;
     arch.chunks.items[0].len = 2;
+    var boundary = arch.iterUnused();
+    const last = boundary.nextStorage().?;
+    try expectEqual(1, last.chunk_index);
+    try expectEqual(0, last.row_in_chunk);
+    try expect(last.id.eql(EntityId.init(2, 1)));
+    arch.ids.items.len = filled;
     arch.chunks.items[1].len = 1;
 
     // Columns are packed by size, so `Big` is column 0 and `Small` is column 1.

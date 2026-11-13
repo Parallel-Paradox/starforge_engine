@@ -80,9 +80,9 @@ pub fn len(self: @This()) usize {
     return self.ids.items.len;
 }
 
-/// Total number of entities all chunks can hold, saturating at `usize`'s maximum.
+/// Number of entity slots backed by both component storage and id storage.
 pub fn capacity(self: @This()) usize {
-    return self.layout.capacity * self.chunks.items.len;
+    return @min(self.layout.capacity * self.chunks.items.len, self.ids.capacity);
 }
 
 /// Appends an entity id and returns its uninitialized row without allocating.
@@ -94,7 +94,6 @@ pub fn capacity(self: @This()) usize {
 pub fn appendUninitAssumeCapacity(self: *@This(), id: EntityId) usize {
     const row = self.len();
     std.debug.assert(row < self.capacity());
-    std.debug.assert(row < self.ids.capacity);
     const chunk = &self.chunks.items[row / self.layout.capacity];
     std.debug.assert(chunk.len == row % self.layout.capacity);
 
@@ -181,6 +180,18 @@ pub fn swapRemoveWithoutDeinit(self: *@This(), row: usize) ?EntityId {
 /// Returns an iterator over the live entities, in dense storage order.
 pub fn iter(self: *@This()) Iter {
     return .{ .archetype = self };
+}
+
+/// Returns an iterator positioned at the first unused slot, for `nextStorage`.
+/// Reserve capacity before iterating. Filling slots does not publish entities.
+pub fn iterUnused(self: *@This()) Iter {
+    const row = self.len();
+    return .{
+        .archetype = self,
+        .row = row,
+        .chunk_index = row / self.layout.capacity,
+        .row_in_chunk = row % self.layout.capacity,
+    };
 }
 
 /// Reserves capacity for at least `additional` more entities.

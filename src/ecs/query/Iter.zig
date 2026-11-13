@@ -59,7 +59,7 @@ pub fn accept(self: @This(), item: Item) bool {
     const cached = self.cache();
     if (!cached.needs_entity_filter) return true;
 
-    const target = self.state.world.entityReg().get(item.id) orelse return false;
+    const target = self.state.world.entityReg().get(item.id.*) orelse return false;
     return self.state.filter.judgeEntity(target.signature);
 }
 
