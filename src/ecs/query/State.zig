@@ -68,7 +68,7 @@ pub fn iter(self: *const @This()) Iter {
     var index: usize = 0;
     while (index < self.caches.items.len) : (index += 1) {
         const cached = self.caches.items[index];
-        const archetype = self.world.archReg().getById(cached.id) orelse continue;
+        const archetype = self.world.archeReg().getById(cached.id) orelse continue;
         return .{ .state = self, .current_index = index, .iter = archetype.iter() };
     }
 
@@ -101,7 +101,7 @@ pub fn deinit(self: *@This()) void {
 ///
 /// Asserts that the target layout was installed (see `Query.extract`).
 pub fn update(self: *@This()) Allocator.Error!void {
-    const registry = self.world.archReg();
+    const registry = self.world.archeReg();
     const log = &registry.change_log;
 
     if (self.version < log.oldest_ver or self.version > log.next_ver) {
@@ -138,7 +138,7 @@ fn resolveSparse(self: *@This()) void {
 pub fn rebuild(self: *@This()) Allocator.Error!void {
     self.resolveSparse();
 
-    const registry = self.world.archReg();
+    const registry = self.world.archeReg();
 
     self.clear();
     errdefer {

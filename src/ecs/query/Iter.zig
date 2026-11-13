@@ -32,7 +32,7 @@ pub fn next(self: *@This()) ?Item {
             if (self.current_index >= self.state.caches.items.len) return null;
 
             const cached = self.state.caches.items[self.current_index];
-            const archetype = self.state.world.archReg().getById(cached.id) orelse continue;
+            const archetype = self.state.world.archeReg().getById(cached.id) orelse continue;
             self.iter = archetype.iter();
             break;
         }

@@ -45,7 +45,7 @@ pub fn entityReg(self: *@This()) *EntityRegistry {
 }
 
 /// Returns the archetype registry backing this world.
-pub fn archReg(self: *@This()) *ArchetypeRegistry {
+pub fn archeReg(self: *@This()) *ArchetypeRegistry {
     return &self.entity_reg.arche_reg;
 }
 

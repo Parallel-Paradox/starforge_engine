@@ -543,12 +543,12 @@ test "extract refreshes the cached archetypes" {
 
     // Removal is picked up incrementally too.
     const archetype_id = world.entityReg().get(added).?.archetype_id;
-    try world.archReg().remove(archetype_id);
+    try world.archeReg().remove(archetype_id);
     query = try Positions.extract(&ctx);
     try expectEqual(1, drain(&query));
 
     // An evicted change-log window forces a full rebuild instead.
-    const log = &world.archReg().change_log;
+    const log = &world.archeReg().change_log;
     log.record(ArchetypeId.init(0, 0));
     log.oldest_ver = ctx.version + 1;
 
