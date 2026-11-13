@@ -8,6 +8,7 @@ words = [
     "comptime",
     "deinit",
     "deinits",
+    "destructors",
     "ecs",
     "eql",
     "errdefer",
@@ -15,14 +16,13 @@ words = [
     "ints",
     "lifecycle",
     "oom",
+    "ptrs",
     "sso",
     "starforge",
     "strs",
     "tls",
+    "uninit",
     "vtable",
     "zon",
 ]
-ignore_patterns = [
-    "N-V-__[A-Za-z0-9_-]{30,}",
-    '"-D[A-Za-z0-9_=]+"',
-]
+ignore_patterns = ["N-V-__[A-Za-z0-9_-]{30,}", '"-D[A-Za-z0-9_=]+"']

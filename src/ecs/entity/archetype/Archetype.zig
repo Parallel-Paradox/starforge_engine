@@ -85,6 +85,24 @@ pub fn capacity(self: @This()) usize {
     return self.layout.capacity * self.chunks.items.len;
 }
 
+/// Appends an entity id and returns its uninitialized row without allocating.
+/// Call `reserve` first to ensure both row and id capacity.
+///
+/// The row is immediately live. The caller must initialize every column before
+/// reading it or running destructors, and must not leave it partially initialized
+/// on an error path. No component constructors or destructors are called.
+pub fn appendUninitAssumeCapacity(self: *@This(), id: EntityId) usize {
+    const row = self.len();
+    std.debug.assert(row < self.capacity());
+    std.debug.assert(row < self.ids.capacity);
+    const chunk = &self.chunks.items[row / self.layout.capacity];
+    std.debug.assert(chunk.len == row % self.layout.capacity);
+
+    self.ids.appendAssumeCapacity(id);
+    chunk.len += 1;
+    return row;
+}
+
 /// Returns the component storage for `row` in `column` and the row's entity id.
 pub fn at(self: @This(), column: usize, row: usize) struct { data: []u8, id: EntityId } {
     std.debug.assert(column < self.meta.columns.items.len);
@@ -119,10 +137,8 @@ pub fn typedAt(self: @This(), T: type, column: usize, row: usize) struct { ptr: 
 /// Retains all chunks and their buffers. Asserts that `row` is live.
 pub fn swapRemove(self: *@This(), row: usize) ?EntityId {
     std.debug.assert(row < self.len());
-    const last = self.len() - 1;
     const per_chunk = self.layout.capacity;
     const removed_chunk = &self.chunks.items[row / per_chunk];
-    const last_chunk = &self.chunks.items[last / per_chunk];
 
     for (self.meta.columns.items, self.layout.column_offsets.items) |column, offset| {
         const removed_ptr = removed_chunk.ptr + offset + (row % per_chunk) * column.meta.size;
@@ -130,7 +146,27 @@ pub fn swapRemove(self: *@This(), row: usize) ?EntityId {
             .trivial => {},
             .managed => |deinit_fn| deinit_fn(@ptrCast(removed_ptr)),
         }
-        if (row != last and column.meta.size != 0) {
+    }
+    return self.swapRemoveWithoutDeinit(row);
+}
+
+/// Removes `row` without destroying its components, filling its slot with the
+/// last entity. Returns that entity's id, or null if `row` was last.
+///
+/// The caller must first transfer ownership or destroy every component in `row`.
+/// The old last row's bytes cease to own values after the move. Retains all
+/// capacity, allocates nothing, and asserts that `row` is live.
+pub fn swapRemoveWithoutDeinit(self: *@This(), row: usize) ?EntityId {
+    std.debug.assert(row < self.len());
+    const last = self.len() - 1;
+    const per_chunk = self.layout.capacity;
+    const last_chunk = &self.chunks.items[last / per_chunk];
+
+    if (row != last) {
+        const removed_chunk = &self.chunks.items[row / per_chunk];
+        for (self.meta.columns.items, self.layout.column_offsets.items) |column, offset| {
+            if (column.meta.size == 0) continue;
+            const removed_ptr = removed_chunk.ptr + offset + (row % per_chunk) * column.meta.size;
             const last_ptr = last_chunk.ptr + offset + (last % per_chunk) * column.meta.size;
             @memcpy(removed_ptr[0..column.meta.size], last_ptr[0..column.meta.size]);
         }
@@ -593,7 +629,7 @@ test "swapRemove moves every column and retains storage through the last removal
     try expectEqual(old_ptr, arch.chunks.items[0].ptr);
 }
 
-test "swapRemove across chunks destroys each managed column exactly once" {
+test "row removal across chunks transfers or destroys each managed component once" {
     const allocator = std.testing.allocator;
     const Large = struct {
         pub const se_component: CompMark = .{};
@@ -622,6 +658,9 @@ test "swapRemove across chunks destroys each managed column exactly once" {
     {
         var arch = try init(allocator, &.{ large, other }, registry);
         defer arch.deinit();
+        var dest = try init(allocator, &.{other}, registry);
+        defer dest.deinit();
+        try dest.reserve(1);
         // Two entities fit per chunk; retain a third, entirely unused chunk too.
         try arch.reserve(5);
         try expectEqual(2, arch.layout.capacity);
@@ -629,12 +668,12 @@ test "swapRemove across chunks destroys each managed column exactly once" {
         const large_column = arch.meta.id_to_col.get(TypeId.of(Large)).?;
         const other_column = arch.meta.id_to_col.get(TypeId.of(Other)).?;
         for (0..3) |index| {
-            arch.ids.appendAssumeCapacity(EntityId.init(@intCast(index), 1));
-            const value = arch.typedAt(Large, large_column, index).ptr;
+            const row = arch.appendUninitAssumeCapacity(EntityId.init(@intCast(index), 1));
+            const value = arch.typedAt(Large, large_column, row).ptr;
             value.calls = &large_calls[index];
             @memset(&value.bytes, @intCast(index + 10));
-            arch.typedAt(Other, other_column, index).ptr.* = .{ .calls = &other_calls[index] };
-            arch.chunks.items[index / arch.layout.capacity].len += 1;
+            arch.typedAt(Other, other_column, row).ptr.* = .{ .calls = &other_calls[index] };
+            try expectEqual(index, row);
         }
         const old_capacity = arch.capacity();
         const old_ptrs = [_][*]u8{
@@ -643,13 +682,19 @@ test "swapRemove across chunks destroys each managed column exactly once" {
             arch.chunks.items[2].ptr,
         };
 
-        try expect(arch.swapRemove(0).?.eql(EntityId.init(2, 1)));
+        // Keep Other in the destination and explicitly destroy the removed Large.
+        const row = dest.appendUninitAssumeCapacity(arch.ids.items[0]);
+        dest.typedAt(Other, 0, row).ptr.* = arch.typedAt(Other, other_column, 0).ptr.*;
+        arch.typedAt(Large, large_column, 0).ptr.deinit();
+        try expect(arch.swapRemoveWithoutDeinit(0).?.eql(EntityId.init(2, 1)));
+        try expect(dest.ids.items[row].eql(EntityId.init(0, 1)));
+        try expectEqual(&other_calls[0], dest.typedAt(Other, 0, row).ptr.calls);
         try expectEqual(2, arch.len());
         try expectEqual(2, arch.chunks.items[0].len);
         try expectEqual(0, arch.chunks.items[1].len);
         try expectEqual(0, arch.chunks.items[2].len);
         try expectEqual([_]usize{ 1, 0, 0 }, large_calls);
-        try expectEqual([_]usize{ 1, 0, 0 }, other_calls);
+        try expectEqual([_]usize{ 0, 0, 0 }, other_calls);
         const moved = arch.typedAt(Large, large_column, 0);
         try expect(moved.id.eql(EntityId.init(2, 1)));
         try expectEqual(&large_calls[2], moved.ptr.calls);
@@ -659,7 +704,7 @@ test "swapRemove across chunks destroys each managed column exactly once" {
         try expect(arch.swapRemove(1) == null);
         try expectEqual(1, arch.chunks.items[0].len);
         try expectEqual([_]usize{ 1, 1, 0 }, large_calls);
-        try expectEqual([_]usize{ 1, 1, 0 }, other_calls);
+        try expectEqual([_]usize{ 0, 1, 0 }, other_calls);
         try expectEqual(old_capacity, arch.capacity());
         try expectEqual(3, arch.chunks.items.len);
         for (arch.chunks.items, old_ptrs) |chunk, ptr| try expectEqual(ptr, chunk.ptr);
@@ -669,18 +714,18 @@ test "swapRemove across chunks destroys each managed column exactly once" {
     try expectEqual([_]usize{ 1, 1, 1 }, other_calls);
 }
 
-test "swapRemove supports a component-free archetype" {
+test "row operations support a component-free archetype" {
     const allocator = std.testing.allocator;
     var registry = CompRegistry.init(allocator);
     defer registry.deinit();
     var arch = try init(allocator, &.{}, registry);
     defer arch.deinit();
     try arch.reserve(2);
-    arch.ids.appendAssumeCapacity(EntityId.init(4, 1));
-    arch.ids.appendAssumeCapacity(EntityId.init(5, 1));
-    arch.chunks.items[0].len = 2;
+    try expectEqual(0, arch.appendUninitAssumeCapacity(EntityId.init(4, 1)));
+    try expectEqual(1, arch.appendUninitAssumeCapacity(EntityId.init(5, 1)));
+    try expectEqual(2, arch.chunks.items[0].len);
 
-    try expect(arch.swapRemove(0).?.eql(EntityId.init(5, 1)));
+    try expect(arch.swapRemoveWithoutDeinit(0).?.eql(EntityId.init(5, 1)));
     try expect(arch.ids.items[0].eql(EntityId.init(5, 1)));
     try expectEqual(1, arch.chunks.items[0].len);
     try expect(arch.swapRemove(0) == null);
@@ -689,7 +734,7 @@ test "swapRemove supports a component-free archetype" {
     try expectEqual(2, arch.capacity());
 }
 
-test "swapRemove destroys zero-sized managed values once including teardown" {
+test "row removal destroys zero-sized managed values once including teardown" {
     const allocator = std.testing.allocator;
     const ManagedTag = struct {
         pub const se_component: CompMark = .{};
@@ -708,13 +753,11 @@ test "swapRemove destroys zero-sized managed values once including teardown" {
         var arch = try init(allocator, &.{tag}, registry);
         defer arch.deinit();
         try arch.reserve(3);
-        for (0..3) |index| {
-            arch.ids.appendAssumeCapacity(EntityId.init(@intCast(index), 1));
-        }
-        arch.chunks.items[0].len = 3;
+        for (0..3) |index| _ = arch.appendUninitAssumeCapacity(EntityId.init(@intCast(index), 1));
         try expectEqual(0, arch.layout.size);
 
-        try expect(arch.swapRemove(1).?.eql(EntityId.init(2, 1)));
+        arch.typedAt(ManagedTag, 0, 1).ptr.deinit();
+        try expect(arch.swapRemoveWithoutDeinit(1).?.eql(EntityId.init(2, 1)));
         try expectEqual(1, ManagedTag.calls);
         try expectEqual(2, arch.chunks.items[0].len);
         try expect(arch.swapRemove(1) == null);
