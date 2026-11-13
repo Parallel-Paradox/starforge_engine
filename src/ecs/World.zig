@@ -8,7 +8,7 @@ const ComponentRegistry = component.Registry;
 const entity = ecs.entity;
 const EntityId = entity.Id;
 const EntityRegistry = entity.Registry;
-const Change = entity.Entity.Change;
+const Change = entity.Change;
 const ArchetypeRegistry = entity.archetype.Registry;
 const SparseSetRegistry = entity.sparse_set.Registry;
 const ResId = ecs.resource.Id;
@@ -108,7 +108,7 @@ pub fn addEntity(
 
 pub const ModifyEntityError = EntityRegistry.ModifyError || ComponentRegistry.RegisterError;
 
-/// Applies a typed Entity.Change, consuming insertions only on success.
+/// Applies a typed entity.Change, consuming insertions only on success.
 /// Replaces existing values and ignores absent removals without registering them.
 /// May invalidate borrows and iterators.
 pub fn modifyEntity(
