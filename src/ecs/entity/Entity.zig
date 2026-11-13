@@ -37,42 +37,51 @@ pub fn deinit(self: *@This(), allocator: Allocator) void {
 /// type lists.
 /// Duplicate or overlapping component types are rejected after flattening.
 ///
-/// Use `Change(&.{ Position, Health }, &.{Velocity})` for a homogeneous batch.
+/// Use `Change(.{ .insert = &.{ Position, Health }, .remove = &.{Velocity} })` for a batch.
 /// An empty insertion list defaults `insert` to the empty tuple.
-pub fn Change(comptime insert_list: []const type, comptime remove_list: []const type) type {
+pub fn Change(comptime list: struct {
+    insert: []const type = &.{},
+    remove: []const type = &.{},
+}) type {
     const component = ecs.component;
     const Bundle = engine.reflect.Bundle;
-    const Insert = @Tuple(insert_list);
-    const insert_types = Bundle.flatTypes(Insert);
-    const remove_types = Bundle.flatTypes(@Tuple(remove_list));
-    for (insert_types, 0..) |T, i| {
+    const Insert = @Tuple(list.insert);
+    const flat_insert_types = Bundle.flatTypes(Insert);
+    const flat_remove_types = Bundle.flatTypes(@Tuple(list.remove));
+    for (flat_insert_types, 0..) |T, i| {
         component.assertComponent(T, "Entity.Change insert");
-        for (insert_types[0..i]) |U| {
+        for (flat_insert_types[0..i]) |U| {
             if (T == U)
                 @compileError("Entity.Change inserts component more than once: " ++ @typeName(T));
         }
     }
-    for (remove_types, 0..) |T, i| {
+    for (flat_remove_types, 0..) |T, i| {
         component.assertComponent(T, "Entity.Change remove");
-        for (remove_types[0..i]) |U| {
+        for (flat_remove_types[0..i]) |U| {
             if (T == U)
                 @compileError("Entity.Change removes component more than once: " ++ @typeName(T));
         }
-        for (insert_types) |U| {
+        for (flat_insert_types) |U| {
             if (T == U)
                 @compileError("Entity.Change both inserts and removes component: " ++ @typeName(T));
         }
     }
 
-    if (insert_list.len == 0) return struct {
+    if (list.insert.len == 0) return struct {
+        pub const insert_types = flat_insert_types;
+        pub const remove_types = flat_remove_types;
+
         id: Id,
         insert: Insert = .{},
-        comptime remove: []const type = &remove_types,
+        comptime remove: []const type = &flat_remove_types,
     };
     return struct {
+        pub const insert_types = flat_insert_types;
+        pub const remove_types = flat_remove_types;
+
         id: Id,
         insert: Insert,
-        comptime remove: []const type = &remove_types,
+        comptime remove: []const type = &flat_remove_types,
     };
 }
 
@@ -95,7 +104,7 @@ const Transform = struct {
 };
 
 test "Change preserves batch values and stores removal types at comptime" {
-    const Request = Change(&.{Transform}, &.{Velocity});
+    const Request = Change(.{ .insert = &.{Transform}, .remove = &.{Velocity} });
     const batch = [_]Request{
         .{ .id = Id.init(0, 0), .insert = .{Transform{ .position = .{ .x = 3 } }} },
         .{ .id = Id.init(1, 0), .insert = .{Transform{ .position = .{ .x = 7 } }} },
@@ -107,11 +116,13 @@ test "Change preserves batch values and stores removal types at comptime" {
     try expectEqual(1, batch[0].remove.len);
     try expect(batch[0].remove[0] == Velocity);
     try expect(@FieldType(Request, "insert") == @Tuple(&.{Transform}));
+    try expect(Request.insert_types.len == 1 and Request.insert_types[0] == Position);
+    try expect(Request.remove_types.len == 1 and Request.remove_types[0] == Velocity);
     try expectEqual(@sizeOf(struct { id: Id, insert: @Tuple(&.{Transform}) }), @sizeOf(Request));
 }
 
 test "Change supports insertion-only requests" {
-    const insert: Change(&.{ Position, Velocity }, &.{}) = .{
+    const insert: Change(.{ .insert = &.{ Position, Velocity } }) = .{
         .id = Id.init(0, 0),
         .insert = .{ Position{ .x = 3 }, Velocity{ .dx = 7 } },
     };
@@ -126,13 +137,13 @@ test "Change flattens nested removals and defaults to an empty insertion tuple" 
         transform: Transform,
         velocity: Velocity,
     };
-    const remove: Change(&.{}, &.{Movement}) = .{ .id = Id.init(0, 0) };
+    const remove: Change(.{ .remove = &.{Movement} }) = .{ .id = Id.init(0, 0) };
     try expectEqual(0, remove.insert.len);
     try expectEqual(2, remove.remove.len);
     try expect(remove.remove[0] == Position);
     try expect(remove.remove[1] == Velocity);
 
-    const empty: Change(&.{}, &.{}) = .{ .id = remove.id };
+    const empty: Change(.{}) = .{ .id = remove.id };
     try expectEqual(0, empty.insert.len);
     try expectEqual(0, empty.remove.len);
 }

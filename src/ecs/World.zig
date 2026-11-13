@@ -8,6 +8,7 @@ const ComponentRegistry = component.Registry;
 const entity = ecs.entity;
 const EntityId = entity.Id;
 const EntityRegistry = entity.Registry;
+const Change = entity.Entity.Change;
 const ArchetypeRegistry = entity.archetype.Registry;
 const SparseSetRegistry = entity.sparse_set.Registry;
 const ResId = ecs.resource.Id;
@@ -103,6 +104,34 @@ pub fn addEntity(
     var bundle = try Bundle.init(self.allocator, fields);
     errdefer bundle.releaseStorage();
     return self.entity_reg.addBundle(bundle);
+}
+
+pub const ModifyEntityError = EntityRegistry.ModifyError || ComponentRegistry.RegisterError;
+
+/// Applies a typed Entity.Change, consuming insertions only on success.
+/// Replaces existing values and ignores absent removals without registering them.
+/// May invalidate borrows and iterators.
+pub fn modifyEntity(
+    self: *@This(),
+    comptime Request: type,
+    change: Request,
+) ModifyEntityError!void {
+    if (!self.entity_reg.contains(change.id)) return error.UnknownEntity;
+    inline for (Request.insert_types) |T| _ = try self.entity_reg.comp_reg.register(T);
+
+    var remove_ids: [Request.remove_types.len]component.Id = undefined;
+    var remove_count: usize = 0;
+    inline for (Request.remove_types) |T| {
+        if (self.entity_reg.comp_reg.idOf(T)) |id| {
+            if (self.entity_reg.comp_reg.getById(id) != null) {
+                remove_ids[remove_count] = id;
+                remove_count += 1;
+            }
+        }
+    }
+    var bundle = try Bundle.init(self.allocator, change.insert);
+    errdefer bundle.releaseStorage();
+    try self.entity_reg.modify(change.id, bundle, remove_ids[0..remove_count]);
 }
 
 /// Destroys the entity and its components, returning whether it was live.
@@ -228,6 +257,37 @@ test "addEntity registers components and creates an entity" {
     // _ = world.addEntity(.{ @as(u32, 1) });
 }
 
+test "modifyEntity accepts typed changes with nested bundles and absent removals" {
+    const Missing = struct {
+        pub const se_component: TestMark = .{};
+    };
+    var world = init(std.testing.allocator, std.testing.io);
+    defer world.deinit();
+    const id = try world.addEntity(.{Health{ .value = 7 }});
+    const RequestA = Change(.{ .insert = &.{Transform}, .remove = &.{ Health, Missing } });
+    try world.modifyEntity(RequestA, .{
+        .id = id,
+        .insert = .{Transform{ .position = .{ .x = 1, .y = 2 } }},
+    });
+    try expectEqual(1, world.getComponent(id, Position).?.x);
+    try expect(!world.hasComponent(id, Health));
+    try expect(world.compReg().idOf(Missing) == null);
+
+    const RequestB = Change(.{ .insert = &.{Health}, .remove = &.{Transform} });
+    const change: RequestB = .{ .id = id, .insert = .{Health{ .value = 9 }} };
+    try world.modifyEntity(RequestB, change);
+    try expect(!world.hasComponent(id, Position));
+    try expectEqual(9, world.getComponent(id, Health).?.value);
+    try world.modifyEntity(Change(.{}), .{ .id = id });
+    try world.modifyEntity(Change(.{ .remove = &.{Health} }), .{ .id = id });
+    try world.modifyEntity(Change(.{ .insert = &.{Position} }), .{
+        .id = id,
+        .insert = .{Position{ .x = 3, .y = 4 }},
+    });
+    try expectEqual(1, world.entityCount());
+    try expectError(error.UnknownEntity, world.modifyEntity(Change(.{}), .{ .id = .invalid }));
+}
+
 test "addEntity delegates requirement completion to the entity registry" {
     const Required = struct {
         pub const se_component: TestMark = .{ .storage = .sparse_set };
@@ -260,7 +320,7 @@ test "component access does not register types" {
     }
 }
 
-test "component access supports zero sized and highly aligned types" {
+test "component access and modification support zero sized and highly aligned types" {
     inline for (.{ component.Storage.archetype, component.Storage.sparse_set }) |storage| {
         const Tag = struct {
             pub const se_component: TestMark = .{ .storage = storage };
@@ -281,6 +341,14 @@ test "component access supports zero sized and highly aligned types" {
         try expectEqual(@as(u32, 13), readonly.getComponent(aligned, Aligned).?.value);
         world.getComponentMut(aligned, Aligned).?.value = 23;
         try expectEqual(@as(u32, 23), readonly.getComponent(aligned, Aligned).?.value);
+
+        try world.modifyEntity(Change(.{ .insert = &.{Aligned}, .remove = &.{Tag} }), .{
+            .id = tag,
+            .insert = .{Aligned{ .value = 31 }},
+        });
+        try expect(!world.hasComponent(tag, Tag));
+        try expectEqual(31, world.getComponent(tag, Aligned).?.value);
+        try expectEqual(23, world.getComponent(aligned, Aligned).?.value);
     }
 }
 
@@ -295,6 +363,14 @@ test "addEntity releases the temporary bundle without disposing copied values" {
     // The archetype layout fails after `Bundle.init` has copied the fields.
     try expectError(error.BufferTooLarge, world.addEntity(.{huge}));
     try expect(calls == 0);
+
+    const id = try world.addEntity(.{});
+    try expectError(error.BufferTooLarge, world.modifyEntity(Change(.{ .insert = &.{Huge} }), .{
+        .id = id,
+        .insert = .{huge},
+    }));
+    try expectEqual(0, world.getEntity(id).?.signature.mask.count());
+    try expectEqual(0, calls);
 
     // The caller still owns the value.
     huge.deinit();
