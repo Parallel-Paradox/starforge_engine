@@ -39,14 +39,9 @@ map: std.array_hash_map.Auto(TypeId, Parcel) = .{},
 /// failure callers must free them (e.g. with `errdefer`). The allocator is stored and used by
 /// every later operation on the bundle.
 pub fn init(allocator: Allocator, fields: anytype) Allocator.Error!@This() {
-    switch (@typeInfo(@TypeOf(fields))) {
-        .@"struct" => {},
-        else => @compileError(
-            "Bundle.init expects a struct, found " ++ @typeName(@TypeOf(fields)),
-        ),
-    }
+    const values = flat(fields);
     comptime {
-        const types = flatTypes(@TypeOf(fields));
+        const types = @typeInfo(@TypeOf(values)).@"struct".field_types;
         for (types, 0..) |T, i| {
             if (!Parcel.canStore(T)) @compileError("Bundle cannot store type " ++ @typeName(T));
             const S = Parcel.StorageOf(T);
@@ -59,8 +54,11 @@ pub fn init(allocator: Allocator, fields: anytype) Allocator.Error!@This() {
 
     var bundle: @This() = .{ .allocator = allocator };
     errdefer bundle.releaseStorage();
-    try bundle.map.ensureUnusedCapacity(allocator, flatCount(@TypeOf(fields)));
-    try bundle.addFields(fields);
+    try bundle.map.ensureUnusedCapacity(allocator, values.len);
+    inline for (values) |value| {
+        const parcel = try Parcel.init(allocator, value);
+        bundle.map.putAssumeCapacityNoClobber(parcel.meta.id, parcel);
+    }
     return bundle;
 }
 
@@ -72,50 +70,53 @@ pub fn releaseStorage(self: *@This()) void {
     self.map = .{};
 }
 
-/// Stores every field of `fields`, flattening marked structs.
-fn addFields(self: *@This(), fields: anytype) Allocator.Error!void {
-    const field_info = @typeInfo(@TypeOf(fields)).@"struct";
-    inline for (field_info.field_names, field_info.field_types) |field_name, field_type| {
-        if (comptime isBundle(field_type)) {
-            try self.addFields(@field(fields, field_name));
-        } else {
-            const parcel = try Parcel.init(self.allocator, @field(fields, field_name));
-            self.map.putAssumeCapacityNoClobber(parcel.meta.id, parcel);
+/// Copies the fields into a tuple, recursively expanding marked bundle structs.
+/// Unmarked structs remain values. Field types and traversal order are preserved,
+/// including duplicate types. This does not allocate or transfer ownership.
+pub fn flat(fields: anytype) Flat(@TypeOf(fields)) {
+    var values: Flat(@TypeOf(fields)) = undefined;
+    comptime var index: usize = 0;
+    const info = @typeInfo(@TypeOf(fields)).@"struct";
+    inline for (info.field_names, info.field_types) |name, T| {
+        const nested = if (comptime isBundle(T))
+            flat(@field(fields, name))
+        else
+            .{@field(fields, name)};
+        inline for (nested) |value| {
+            values[index] = value;
+            index += 1;
         }
     }
+    return values;
+}
+
+/// Preserves comptime fields so literals can coexist with runtime values in the tuple.
+fn Flat(comptime T: type) type {
+    const info = switch (@typeInfo(T)) {
+        .@"struct" => |info| info,
+        else => @compileError("Bundle expects a struct, found " ++ @typeName(T)),
+    };
+    var Tuple = @TypeOf(.{});
+    for (info.field_types, info.field_attrs) |Field, attrs| {
+        const Part = if (isBundle(Field))
+            Flat(Field)
+        else if (attrs.@"comptime")
+            @TypeOf(.{attrs.defaultValue(Field).?})
+        else
+            @Tuple(&.{Field});
+        Tuple = @TypeOf(@as(Tuple, undefined) ++ @as(Part, undefined));
+    }
+    return Tuple;
 }
 
 /// Number of fields `T` contributes once marked structs are flattened.
 fn flatCount(comptime T: type) usize {
-    const field_info = switch (@typeInfo(T)) {
-        .@"struct" => |info| info,
-        else => return 0,
-    };
-    var count: usize = 0;
-    inline for (field_info.field_types) |field_type| {
-        count += if (comptime isBundle(field_type)) flatCount(field_type) else 1;
-    }
-    return count;
+    return @typeInfo(Flat(T)).@"struct".field_types.len;
 }
 
 /// The flattened field types of `T` in traversal order.
 pub fn flatTypes(comptime T: type) [flatCount(T)]type {
-    var types: [flatCount(T)]type = undefined;
-    var index: usize = 0;
-    fillFlatTypes(T, &types, &index);
-    return types;
-}
-
-fn fillFlatTypes(comptime T: type, types: anytype, index: *usize) void {
-    const field_info = @typeInfo(T).@"struct";
-    inline for (field_info.field_types) |field_type| {
-        if (comptime isBundle(field_type)) {
-            fillFlatTypes(field_type, types, index);
-        } else {
-            types[index.*] = field_type;
-            index.* += 1;
-        }
-    }
+    return @typeInfo(Flat(T)).@"struct".field_types[0..comptime flatCount(T)].*;
 }
 
 /// Deinits every parcel and frees the map, leaving an empty bundle with the same allocator.
@@ -248,15 +249,20 @@ test "isBundle detects the se_bundle declaration" {
     try expect(!isBundle(u32));
 }
 
-test "init flattens marked structs recursively" {
+test "flat and init flatten marked structs recursively" {
     const allocator = std.testing.allocator;
-    var bundle = try init(allocator, .{
+    const fields = .{
         .outer = Outer{
             .inner = .{ .id = 7, .ratio = 0.5 },
             .flag = true,
         },
         .plain = Plain{ .count = 3 },
-    });
+    };
+    try std.testing.expectEqualDeep(.{ 7, 0.5, true, Plain{ .count = 3 } }, flat(fields));
+    try expectEqual(0, flat(.{}).len);
+    try std.testing.expectEqualDeep(.{ 1, 2 }, flat(.{ .first = 1, .second = 2 }));
+
+    var bundle = try init(allocator, fields);
     defer bundle.deinit();
 
     try expectEqual(4, bundle.map.count());
