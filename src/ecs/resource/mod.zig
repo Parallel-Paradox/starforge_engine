@@ -78,6 +78,8 @@ fn ResourceParam(comptime T: type, comptime mutable: bool) type {
     };
 }
 
+const expect = @import("std").testing.expect;
+
 test {
     _ = Registry;
 }
@@ -143,7 +145,6 @@ test "resource parameters cache their id and borrow shared storage" {
 }
 
 test "resource markers must have type Mark" {
-    const std = @import("std");
     const Good = struct {
         pub const se_resource: Mark = .{};
     };
@@ -152,7 +153,7 @@ test "resource markers must have type Mark" {
     };
 
     assertResource(Good, null);
-    try std.testing.expect(!isResource(Wrong));
-    try std.testing.expect(!isResource(struct {}));
-    try std.testing.expect(!isResource(u32));
+    try expect(!isResource(Wrong));
+    try expect(!isResource(struct {}));
+    try expect(!isResource(u32));
 }

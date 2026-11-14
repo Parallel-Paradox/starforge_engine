@@ -309,6 +309,7 @@ fn writeAttributes(writer: *Writer, attrs: []const Attribute) void {
     writer.writeAll(" }") catch {};
 }
 
+const expect = std.testing.expect;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
 test "joinId takes 32 bits from rand_a upward and 16 bits of span id" {
@@ -349,7 +350,7 @@ test "joinId omits invalid IDs and unnecessary separators" {
 }
 
 test "shortSpanId omits invalid IDs" {
-    try std.testing.expect(shortSpanId(.invalid) == null);
+    try expect(shortSpanId(.invalid) == null);
     const short_id = shortSpanId(Span.Id.from(0x00ff_aabb_ccdd_eeff)).?;
     try expectEqualStrings("00ff", &short_id);
 }

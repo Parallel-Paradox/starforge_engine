@@ -592,9 +592,9 @@ test "queries walk every chunk of an archetype" {
 
     var visited: usize = 0;
     while (chunked.next()) |item| : (visited += 1) {
-        try expectEqual(@as(u32, @intCast(visited)), item.id.index.get());
-        try expectEqual(@as(u8, @intCast(visited)), item.big.bytes[0]);
-        try expectEqual(@as(u8, @intCast(visited + 10)), item.small.bytes[0]);
+        try expectEqual(visited, item.id.index.get());
+        try expectEqual(visited, item.big.bytes[0]);
+        try expectEqual(visited + 10, item.small.bytes[0]);
         item.big.bytes[0] = 0xFF;
     }
     try expectEqual(3, visited);

@@ -155,7 +155,7 @@ test "toBytes matches RFC 9562 Appendix A v7 example" {
     _ = try std.fmt.hexToBytes(&expected, "017F22E279B07CC398C4DC0C0C07398F");
     const bytes = uuid.toBytes();
     try expectEqualSlices(u8, &expected, &bytes);
-    try expectEqual(@as(u128, 0x017F22E279B07CC398C4DC0C0C07398F), uuid.toU128());
+    try expectEqual(0x017F22E279B07CC398C4DC0C0C07398F, uuid.toU128());
 }
 
 const expectEqualSlices = std.testing.expectEqualSlices;

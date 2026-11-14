@@ -117,8 +117,8 @@ const expectEqualStrings = std.testing.expectEqualStrings;
 
 test "empty string is empty" {
     const s = @This().empty();
-    try std.testing.expect(s.isEmpty());
-    try std.testing.expect(s.len() == 0);
+    try expect(s.isEmpty());
+    try expect(s.len() == 0);
 }
 
 test "string from slice using SSO" {

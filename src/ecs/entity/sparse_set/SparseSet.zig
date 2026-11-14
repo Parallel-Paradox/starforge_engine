@@ -320,7 +320,7 @@ test "get returns the value for an entity and null when absent" {
     try expectEqual(7, set.get(u32, EntityId.init(0, 1)).?.*);
 
     const bytes = set.getBytes(EntityId.init(0, 1)).?;
-    try expectEqual(@as(usize, @sizeOf(u32)), bytes.len);
+    try expectEqual(@sizeOf(u32), bytes.len);
     try expectEqual(7, @as(*u32, @ptrCast(@alignCast(bytes.ptr))).*);
 
     // An unwritten dense entry, a stale generation, and an out-of-range index are absent.

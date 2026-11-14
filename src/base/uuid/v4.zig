@@ -81,7 +81,7 @@ test "toBytes matches RFC 9562 byte layout" {
     _ = try std.fmt.hexToBytes(&expected, "123456789ABC4DEF8123456789ABCDEF");
     const bytes = uuid.toBytes();
     try expectEqualSlices(u8, &expected, &bytes);
-    try expectEqual(@as(u128, 0x123456789ABC4DEF8123456789ABCDEF), uuid.toU128());
+    try expectEqual(0x123456789ABC4DEF8123456789ABCDEF, uuid.toU128());
 }
 
 test "fromBytes is the inverse of toBytes" {

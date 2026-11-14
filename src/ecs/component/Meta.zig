@@ -102,6 +102,8 @@ pub fn callDeinitErased(self: @This(), ptr: *anyopaque) void {
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectEqualDeep = std.testing.expectEqualDeep;
+const expectEqualSlices = std.testing.expectEqualSlices;
+const expectEqualStrings = std.testing.expectEqualStrings;
 const checkAllAllocationFailures = std.testing.checkAllAllocationFailures;
 
 const Position = struct {
@@ -145,7 +147,7 @@ test "init exposes type, storage and default construction metadata" {
     defer custom.deinit(allocator);
 
     try expect(position.typeId().eql(TypeId.of(Position)));
-    try std.testing.expectEqualStrings(@typeName(Position), position.name());
+    try expectEqualStrings(@typeName(Position), position.name());
     try expectEqual(@sizeOf(Position), position.size());
     try expectEqual(std.mem.Alignment.of(Position), position.alignment());
     try expectEqual(Storage.archetype, position.storage);
@@ -169,7 +171,7 @@ test "init resolves direct requirements, reuses ids and deinit resets metadata" 
 
         const middle = registry.idOf(Middle).?;
         const velocity = registry.idOf(Velocity).?;
-        try std.testing.expectEqualSlices(Id, &.{ position, middle }, meta.require);
+        try expectEqualSlices(Id, &.{ position, middle }, meta.require);
         try expectEqual(registered, registry.getById(position) != null);
         try expect(registry.getById(middle).?.require[0].eql(velocity));
         try expect(registry.getById(velocity) != null);

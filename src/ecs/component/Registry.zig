@@ -210,6 +210,7 @@ pub fn getByTypeId(self: *const @This(), type_id: TypeId) ?*const CompMeta {
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+const expectEqualSlices = std.testing.expectEqualSlices;
 const expectError = std.testing.expectError;
 const checkAllAllocationFailures = std.testing.checkAllAllocationFailures;
 
@@ -289,9 +290,9 @@ test "register resolves the full graph but stores only direct requirements" {
     const c = registry.idOf(Graph.C).?;
     const d = registry.idOf(Graph.D).?;
     const requirements = registry.getById(a).?.require;
-    try std.testing.expectEqualSlices(CompId, &.{ b, c }, requirements);
-    try std.testing.expectEqualSlices(CompId, &.{d}, registry.getById(b).?.require);
-    try std.testing.expectEqualSlices(CompId, &.{d}, registry.getById(c).?.require);
+    try expectEqualSlices(CompId, &.{ b, c }, requirements);
+    try expectEqualSlices(CompId, &.{d}, registry.getById(b).?.require);
+    try expectEqualSlices(CompId, &.{d}, registry.getById(c).?.require);
     try expectEqual(0, registry.getById(d).?.require.len);
     try expectEqual(4, registry.type_to_id.count());
 

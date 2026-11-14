@@ -190,7 +190,7 @@ test "add sets component bits" {
     // Adding existing components is a no-op.
     const again = compIds(&.{ 0, 7, 70 });
     try signature.add(allocator, &again);
-    try expectEqual(@as(usize, 3), signature.mask.count());
+    try expectEqual(3, signature.mask.count());
 }
 
 test "remove clears bits" {
@@ -210,7 +210,7 @@ test "remove clears bits" {
 
     // Removing a component the signature does not have is a no-op.
     signature.remove(&remaining);
-    try expectEqual(@as(usize, 0), signature.mask.count());
+    try expectEqual(0, signature.mask.count());
 }
 
 test "contains and intersects compare component sets" {
@@ -299,18 +299,18 @@ test "Lookup maps signatures to values" {
     // The same components in a different order find the same entry.
     const probe = try initWith(allocator, &.{ 70, 1 });
 
-    try expectEqual(@as(?u32, 10), map.get(probe));
-    try expectEqual(@as(u32, 2), map.count());
+    try expectEqual(10, map.get(probe));
+    try expectEqual(2, map.count());
 
     // Putting an equal key updates the value in place.
     try map.put(allocator, try probe.clone(allocator), 11);
-    try expectEqual(@as(u32, 2), map.count());
-    try expectEqual(@as(?u32, 11), map.get(probe));
+    try expectEqual(2, map.count());
+    try expectEqual(11, map.get(probe));
 
     const missing = try initWith(allocator, &.{5});
-    try expectEqual(@as(?u32, null), map.get(missing));
+    try expectEqual(null, map.get(missing));
 
     try expect(map.remove(probe));
-    try expectEqual(@as(u32, 1), map.count());
-    try expectEqual(@as(?u32, null), map.get(probe));
+    try expectEqual(1, map.count());
+    try expectEqual(null, map.get(probe));
 }

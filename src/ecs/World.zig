@@ -228,7 +228,7 @@ test "addEntity registers components and creates an entity" {
     var world = init(allocator, std.testing.io);
     defer world.deinit();
     const readonly: *const @This() = &world;
-    try expectEqual(@as(usize, 0), readonly.entityCount());
+    try expectEqual(0, readonly.entityCount());
 
     const id = try world.addEntity(.{
         Transform{ .position = .{ .x = 3, .y = 4 } },
@@ -240,18 +240,18 @@ test "addEntity registers components and creates an entity" {
     const created = readonly.getEntity(id).?;
     try expect(created.id.eql(id));
     try expect(created.archetype_id.isValid());
-    try expectEqual(@as(usize, 1), created.sparse_comps.items.len);
+    try expectEqual(1, created.sparse_comps.items.len);
     try expect(world.getEntityMut(id).?.id.eql(id));
     try expect(readonly.hasComponent(id, Position));
     try expect(readonly.hasComponent(id, Health));
-    try expectEqual(@as(i32, 3), readonly.getComponent(id, Position).?.x);
-    try expectEqual(@as(i32, 4), readonly.getComponent(id, Position).?.y);
-    try expectEqual(@as(u32, 7), readonly.getComponent(id, Health).?.value);
+    try expectEqual(3, readonly.getComponent(id, Position).?.x);
+    try expectEqual(4, readonly.getComponent(id, Position).?.y);
+    try expectEqual(7, readonly.getComponent(id, Health).?.value);
 
     world.getComponentMut(id, Position).?.x = 9;
     world.getComponentMut(id, Health).?.value = 11;
-    try expectEqual(@as(i32, 9), readonly.getComponent(id, Position).?.x);
-    try expectEqual(@as(u32, 11), readonly.getComponent(id, Health).?.value);
+    try expectEqual(9, readonly.getComponent(id, Position).?.x);
+    try expectEqual(11, readonly.getComponent(id, Health).?.value);
 
     // A non-component field is a compile error:
     // _ = world.addEntity(.{ @as(u32, 1) });
@@ -338,9 +338,9 @@ test "component access and modification support zero sized and highly aligned ty
         world.getComponentMut(tag, Tag).?.* = .{};
 
         const aligned = try world.addEntity(.{Aligned{ .value = 13 }});
-        try expectEqual(@as(u32, 13), readonly.getComponent(aligned, Aligned).?.value);
+        try expectEqual(13, readonly.getComponent(aligned, Aligned).?.value);
         world.getComponentMut(aligned, Aligned).?.value = 23;
-        try expectEqual(@as(u32, 23), readonly.getComponent(aligned, Aligned).?.value);
+        try expectEqual(23, readonly.getComponent(aligned, Aligned).?.value);
 
         try world.modifyEntity(Change(.{ .insert = &.{Aligned}, .remove = &.{Tag} }), .{
             .id = tag,

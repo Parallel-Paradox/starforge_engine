@@ -597,6 +597,7 @@ fn signatureWords(sig: Signature) []const Word {
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+const expectError = std.testing.expectError;
 
 const CompMark = engine.ecs.component.Mark;
 
@@ -883,7 +884,7 @@ test "init rejects descriptions that expand beyond max_terms" {
         break :blk out;
     };
     const spec = comptime Branch.spec(.all, &alternatives);
-    try std.testing.expectError(error.FilterTooComplex, init(allocator, &registry, spec));
+    try expectError(error.FilterTooComplex, init(allocator, &registry, spec));
 
     // One fewer alternative stays within the bound: 2^10 terms.
     const fewer = comptime Branch.spec(.all, alternatives[0 .. pairs - 1]);

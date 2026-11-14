@@ -164,6 +164,8 @@ pub fn linkTo(
     try self.links.append(allocator, new_link);
 }
 
+const expectEqual = std.testing.expectEqual;
+
 test "link records the target and its attributes" {
     const allocator = std.testing.allocator;
     var default = engine.trace.Tracer.Default.init(allocator, std.testing.io);
@@ -174,7 +176,7 @@ test "link records the target and its attributes" {
     defer span.deinit();
 
     try span.linkTo(span.trace.id, span.id, .{ .k = @as(i64, 7) });
-    try std.testing.expectEqual(@as(usize, 1), span.links.items.len);
-    try std.testing.expectEqual(span.id, span.links.items[0].span_id);
-    try std.testing.expectEqual(@as(i64, 7), span.links.items[0].attrs.items[0].value.int);
+    try expectEqual(1, span.links.items.len);
+    try expectEqual(span.id, span.links.items[0].span_id);
+    try expectEqual(7, span.links.items[0].attrs.items[0].value.int);
 }

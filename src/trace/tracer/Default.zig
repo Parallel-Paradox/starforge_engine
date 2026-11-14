@@ -103,6 +103,9 @@ fn listResources(ptr: *anyopaque) *ResourceList {
     return &this(ptr).resources;
 }
 
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+
 test "span ids are never invalid" {
     var default = Tracer.Default.init(std.testing.allocator, std.testing.io);
     defer default.deinit();
@@ -110,8 +113,8 @@ test "span ids are never invalid" {
     const t = default.tracer();
     for (0..64) |_| {
         const span = t.initSpan(t.initTrace(), .{ .name = "test" });
-        try std.testing.expect(span.id.tryGet() != null);
-        try std.testing.expectEqual(@as(u64, 1), span.id.get() & 1);
+        try expect(span.id.tryGet() != null);
+        try expectEqual(1, span.id.get() & 1);
     }
 }
 
@@ -120,7 +123,7 @@ test "trace ids use UUID v7 version bits" {
     defer default.deinit();
 
     const trace = default.tracer().initTrace();
-    try std.testing.expect(trace.id.tryGet() != null);
+    try expect(trace.id.tryGet() != null);
     const uuid: base.Uuid = @bitCast(trace.id.get());
-    try std.testing.expectEqual(base.Uuid.Version.v7, uuid.ver);
+    try expectEqual(base.Uuid.Version.v7, uuid.ver);
 }

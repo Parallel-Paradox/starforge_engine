@@ -195,6 +195,7 @@ pub fn removeId(self: *@This(), id: TypeId) ?Parcel {
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+const expectEqualDeep = std.testing.expectEqualDeep;
 const expectError = std.testing.expectError;
 
 const Probe = struct {
@@ -258,9 +259,9 @@ test "flat and init flatten marked structs recursively" {
         },
         .plain = Plain{ .count = 3 },
     };
-    try std.testing.expectEqualDeep(.{ 7, 0.5, true, Plain{ .count = 3 } }, flat(fields));
+    try expectEqualDeep(.{ 7, 0.5, true, Plain{ .count = 3 } }, flat(fields));
     try expectEqual(0, flat(.{}).len);
-    try std.testing.expectEqualDeep(.{ 1, 2 }, flat(.{ .first = 1, .second = 2 }));
+    try expectEqualDeep(.{ 1, 2 }, flat(.{ .first = 1, .second = 2 }));
 
     var bundle = try init(allocator, fields);
     defer bundle.deinit();

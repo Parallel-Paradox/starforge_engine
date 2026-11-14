@@ -54,13 +54,17 @@ pub const MockSource = struct {
     }
 };
 
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualSlices = std.testing.expectEqualSlices;
+
 test "IoSource fills buffer with random bytes" {
     const src = IoSource{ .io = std.testing.io };
     const rand = src.interface();
 
     var buf: [32]u8 = @splat(0);
     rand.bytes(&buf);
-    try std.testing.expect(!std.mem.allEqual(u8, &buf, 0));
+    try expect(!std.mem.allEqual(u8, &buf, 0));
 }
 
 test "IoSourceSecure fills buffer with random bytes" {
@@ -69,7 +73,7 @@ test "IoSourceSecure fills buffer with random bytes" {
 
     var buf: [32]u8 = @splat(0);
     rand.bytes(&buf);
-    try std.testing.expect(!std.mem.allEqual(u8, &buf, 0));
+    try expect(!std.mem.allEqual(u8, &buf, 0));
 }
 
 test "MockSource returns buffers in order and wraps around" {
@@ -81,9 +85,9 @@ test "MockSource returns buffers in order and wraps around" {
     const expected = [_][]const u8{ "fish", "bird", "tree", "fish" };
     for (expected) |want| {
         rand.bytes(&buf);
-        try std.testing.expectEqualSlices(u8, want, &buf);
+        try expectEqualSlices(u8, want, &buf);
     }
-    try std.testing.expectEqual(@as(usize, 1), src.index);
+    try expectEqual(1, src.index);
 }
 
 test "MockSource index advances on each fill" {
@@ -92,9 +96,9 @@ test "MockSource index advances on each fill" {
     const rand = src.interface();
 
     var buf: [2]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), src.index);
+    try expectEqual(0, src.index);
     rand.bytes(&buf);
-    try std.testing.expectEqual(@as(usize, 1), src.index);
+    try expectEqual(1, src.index);
     rand.bytes(&buf);
-    try std.testing.expectEqual(@as(usize, 0), src.index);
+    try expectEqual(0, src.index);
 }
