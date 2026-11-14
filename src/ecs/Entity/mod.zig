@@ -13,6 +13,7 @@ const Archetype = ecs.Archetype;
 const SparseSet = ecs.SparseSet;
 
 id: Id,
+/// Owns its bitset when `sparse_comps` is nonempty; otherwise borrows it read-only.
 signature: Signature,
 archetype_id: Archetype.Id,
 archetype_row: usize,
@@ -29,9 +30,9 @@ pub fn init(allocator: Allocator, id: Id) @This() {
     };
 }
 
-/// Releases the entity's signature and sparse component list.
+/// Releases the sparse component list and any owned signature.
 pub fn deinit(self: *@This(), allocator: Allocator) void {
-    self.signature.deinit(allocator);
+    if (self.sparse_comps.items.len != 0) self.signature.deinit(allocator);
     self.sparse_comps.deinit(allocator);
 }
 

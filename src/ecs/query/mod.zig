@@ -230,6 +230,7 @@ fn validatePointerField(comptime name: []const u8, comptime F: type) void {
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+const expectError = std.testing.expectError;
 
 const With = Filter.With;
 const Without = Filter.Without;
@@ -542,6 +543,8 @@ test "extract refreshes the cached archetypes" {
 
     // Removal is picked up incrementally too.
     const archetype_id = world.entityReg().get(added).?.archetype_id;
+    try expectError(error.ArchetypeNotEmpty, world.archeReg().remove(archetype_id));
+    try expect(try world.removeEntity(added));
     try world.archeReg().remove(archetype_id);
     query = try Positions.extract(&ctx);
     try expectEqual(1, drain(&query));

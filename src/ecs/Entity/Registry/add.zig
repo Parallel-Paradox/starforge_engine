@@ -86,16 +86,9 @@ fn addParcels(self: *Self, parcels: []const Parcel) AddParcelsError!Entity.Id {
     const sparse_components = storage_split_ids[archetype_count..];
 
     const archetype_entry = try self.arche_reg.getOrCreate(archetype_components, self.comp_reg);
-    const archetype_id = archetype_entry.id;
     const archetype = &archetype_entry.archetype;
 
-    var entity = try createEntity(
-        self,
-        storage_split_ids,
-        sparse_components,
-        archetype_id,
-        archetype.len(),
-    );
+    var entity = try createEntity(self, archetype_entry, sparse_components);
     errdefer entity.deinit(allocator);
 
     try reserveStorage(self, archetype, entity.id, entity.sparse_comps.items);
@@ -144,10 +137,8 @@ fn splitByStorage(
 /// Reserves an entity slot, builds its component bookkeeping, and resolves its sparse sets.
 fn createEntity(
     self: *Self,
-    ids: []const CompId,
+    archetype: *const Archetype.Registry.Entry,
     sparse_components: []const CompId,
-    archetype_id: Archetype.Id,
-    archetype_row: usize,
 ) Allocator.Error!Entity {
     const allocator = self.allocator;
     const id = if (self.retired.items.len != 0)
@@ -159,15 +150,21 @@ fn createEntity(
     var entity = Entity.init(allocator, id);
     errdefer entity.deinit(allocator);
 
-    try entity.signature.add(allocator, ids);
     try entity.sparse_comps.ensureTotalCapacity(allocator, sparse_components.len);
     for (sparse_components) |comp_id| {
         const meta = self.comp_reg.getById(comp_id).?;
         const set_entry = try self.sparse_reg.getOrCreate(meta.type_meta);
         entity.sparse_comps.appendAssumeCapacity(set_entry.id);
     }
-    entity.archetype_id = archetype_id;
-    entity.archetype_row = archetype_row;
+    const base = archetype.archetype.meta.signature;
+    if (sparse_components.len == 0) {
+        entity.signature = base;
+    } else {
+        entity.signature = try base.clone(allocator);
+        try entity.signature.add(allocator, sparse_components);
+    }
+    entity.archetype_id = archetype.id;
+    entity.archetype_row = archetype.archetype.len();
     return entity;
 }
 

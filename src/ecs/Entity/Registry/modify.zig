@@ -77,16 +77,14 @@ const ModifyStep = struct {
     included: bool = true,
 };
 
-/// The target signature, storage ids, missing defaults, and component steps.
+/// The target storage ids, missing defaults, and component steps.
 const ModifyPlan = struct {
-    signature: Entity.Signature,
     archetype_id: Archetype.Id = .invalid,
     sparse_comps: std.ArrayList(SparseSet.Id) = .empty,
     defaults: std.ArrayList(CompId) = .empty,
     steps: std.array_hash_map.Auto(CompId, ModifyStep) = .{},
 
     fn deinit(self: *@This(), allocator: Allocator) void {
-        self.signature.deinit(allocator);
         self.sparse_comps.deinit(allocator);
         self.defaults.deinit(allocator);
         self.steps.deinit(allocator);
@@ -115,7 +113,7 @@ fn planModify(
         if (containsComp(insert_ids[0..i], id)) return error.DuplicateComponent;
     }
 
-    var plan: ModifyPlan = .{ .signature = Entity.Signature.init(allocator) };
+    var plan: ModifyPlan = .{};
     errdefer plan.deinit(allocator);
     const source_arch = self.arche_reg.getById(source.archetype_id).?;
     for (source_arch.meta.columns.items, 0..) |column, i| {
@@ -167,7 +165,6 @@ fn planModify(
             step.value_index = insert_ids.len + plan.defaults.items.len;
             try plan.defaults.append(allocator, comp_id);
         }
-        try plan.signature.add(allocator, &.{comp_id});
         if (meta.storage == .archetype) try archetype_ids.append(allocator, comp_id);
     }
     plan.archetype_id = (try self.arche_reg.getOrCreate(archetype_ids.items, self.comp_reg)).id;
@@ -216,8 +213,17 @@ fn prepareModify(
         .explicit_count = 0,
     };
     errdefer prepared.deinit(allocator, false);
-    prepared.entity.signature = try plan.signature.clone(allocator);
+    const target = self.arche_reg.getById(plan.archetype_id).?;
     try prepared.entity.sparse_comps.appendSlice(allocator, plan.sparse_comps.items);
+    if (plan.sparse_comps.items.len == 0) {
+        prepared.entity.signature = target.meta.signature;
+    } else {
+        prepared.entity.signature = try target.meta.signature.clone(allocator);
+        for (plan.steps.keys(), plan.steps.values()) |comp_id, step| {
+            const location = step.target orelse continue;
+            if (location == .sparse_set) try prepared.entity.signature.add(allocator, &.{comp_id});
+        }
+    }
     prepared.entity.archetype_id = plan.archetype_id;
     const value_count = insert.map.count() + plan.defaults.items.len;
     try prepared.parcels.ensureTotalCapacity(allocator, value_count);
@@ -230,7 +236,6 @@ fn prepareModify(
     }
 
     const entity = self.get(id).?;
-    const target = self.arche_reg.getById(plan.archetype_id).?;
     if (!entity.archetype_id.eql(plan.archetype_id)) try target.reserve(1);
     for (plan.steps.values()) |step| {
         const location = step.target orelse continue;
@@ -406,6 +411,67 @@ fn testModifyAllocationFailures(allocator: Allocator, migrate: bool) !void {
     }
     try expectEqual([_]usize{ 2, 1, 2, 1 }, calls);
     try expectEqual(AutoRequirement.created, AutoRequirement.destroyed);
+}
+
+fn testSharedSignatures(allocator: Allocator) !void {
+    var registry = Self.init(allocator);
+    defer registry.deinit();
+    const position = try registry.comp_reg.register(Position);
+    const velocity = try registry.comp_reg.register(Velocity);
+    const health = try registry.comp_reg.register(Health);
+
+    var ids: [2]Entity.Id = undefined;
+    for (&ids) |*id| {
+        var bundle = try Bundle.init(std.testing.allocator, .{Position{ .x = 1, .y = 2 }});
+        errdefer bundle.deinit();
+        id.* = try registry.addBundle(bundle);
+    }
+    const original_arch = registry.get(ids[0]).?.archetype_id;
+    const shared = registry.arche_reg.getById(original_arch).?.meta.signature;
+    for (ids) |id| try expect(registry.get(id).?.signature.mask.masks == shared.mask.masks);
+    try expect(shared.has(position));
+    try expectError(error.ArchetypeNotEmpty, registry.arche_reg.remove(original_arch));
+
+    const changes = .{
+        .{ .insert = .{Health{ .value = 7 }}, .remove = &[_]CompId{} },
+        .{ .insert = .{Velocity{ .dx = 3, .dy = 4 }}, .remove = &[_]CompId{} },
+        .{ .insert = .{}, .remove = &[_]CompId{health} },
+        .{ .insert = .{}, .remove = &[_]CompId{velocity} },
+    };
+    inline for (changes, 0..) |change, index| {
+        const before = registry.get(ids[0]).?.*;
+        var insert = try Bundle.init(std.testing.allocator, change.insert);
+        registry.modify(ids[0], insert, change.remove) catch |err| {
+            insert.deinit();
+            const unchanged = registry.get(ids[0]).?;
+            try expect(unchanged.signature.mask.masks == before.signature.mask.masks);
+            try expect(unchanged.signature.eql(before.signature));
+            try expect(unchanged.archetype_id.eql(before.archetype_id));
+            try expect(registry.get(ids[1]).?.signature.mask.masks == shared.mask.masks);
+            return err;
+        };
+        const entity = registry.get(ids[0]).?;
+        const base = registry.arche_reg.getById(entity.archetype_id).?.meta.signature;
+        try expectEqual(index >= 2, entity.signature.mask.masks == base.mask.masks);
+        try expect(entity.signature.has(position));
+        try expectEqual(index < 2, entity.signature.has(health));
+        try expectEqual(index == 1 or index == 2, entity.signature.has(velocity));
+        try expect(!base.has(health));
+        try expect(!shared.has(health));
+        try expect(!shared.has(velocity));
+        try expect(registry.get(ids[1]).?.signature.mask.masks == shared.mask.masks);
+    }
+
+    try expect(registry.get(ids[0]).?.signature.mask.masks == shared.mask.masks);
+    try expect(try registry.remove(ids[0]));
+    try expect(registry.get(ids[1]).?.signature.mask.masks == shared.mask.masks);
+    try expect(registry.get(ids[1]).?.signature.has(position));
+    try expect(try registry.remove(ids[1]));
+    try registry.arche_reg.remove(original_arch);
+}
+
+test "signature ownership survives sparse changes, migration and allocation failures" {
+    try checkAllAllocationFailures(std.testing.allocator, testSharedSignatures, .{});
 }
 
 test "modify preserves ownership on every allocation failure during migration or replacement" {

@@ -135,18 +135,22 @@ pub fn getOrCreate(
     return &self.entries.items[id.index.get()];
 }
 
+pub const RemoveError = error{ArchetypeNotEmpty};
+
 /// Removes the archetype registered for `id`, retiring its id for reuse and releasing its
 /// storage. Does nothing if `id` is unknown.
 ///
 /// # Errors
 ///
-/// Returns an allocator error if the retired-id list cannot grow.
-pub fn remove(self: *@This(), id: Archetype.Id) Allocator.Error!void {
+/// Returns `ArchetypeNotEmpty` if live entities still use the archetype, or an
+/// allocator error if the retired-id list cannot grow.
+pub fn remove(self: *@This(), id: Archetype.Id) (Allocator.Error || RemoveError)!void {
     const index = id.index.tryGet() orelse return;
     if (index >= self.entries.items.len) return;
 
     const entry = &self.entries.items[index];
     if (!entry.id.eql(id)) return;
+    if (entry.archetype.len() != 0) return error.ArchetypeNotEmpty;
 
     try self.retired.ensureUnusedCapacity(self.allocator, 1);
 
