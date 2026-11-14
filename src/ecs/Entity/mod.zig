@@ -4,10 +4,10 @@ const Allocator = std.mem.Allocator;
 const engine = @import("engine");
 const ecs = engine.ecs;
 pub const Id = ecs.Id;
-pub const change = @import("change.zig");
+const change = @import("change.zig");
 pub const Change = change.Change;
 pub const Signature = @import("Signature.zig");
-pub const Registry = @import("Registry.zig");
+pub const Registry = @import("Registry/mod.zig");
 
 const Archetype = ecs.Archetype;
 const SparseSet = ecs.SparseSet;
