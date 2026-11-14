@@ -14,7 +14,6 @@ const Bundle = reflect.Bundle;
 const TypeMeta = reflect.TypeMeta;
 
 const Self = ecs.Entity.Registry;
-const _storage = @import("storage.zig");
 
 pub const ModifyError = Self.AddBundleError || error{
     /// The entity id is unknown, stale, or retired.
@@ -240,7 +239,7 @@ fn prepareModify(
     for (plan.steps.values()) |step| {
         const location = step.target orelse continue;
         if (location != .sparse_set or step.source != null) continue;
-        try _storage.reserveSparseSet(self, location.sparse_set, id);
+        try self.sparse_reg.getById(location.sparse_set).?.reserveForEntity(id);
     }
     return prepared;
 }

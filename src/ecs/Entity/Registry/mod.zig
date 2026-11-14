@@ -16,11 +16,18 @@ const _storage = @import("storage.zig");
 
 pub const AddBundleError = _add.AddBundleError;
 pub const addBundle = _add.addBundle;
+pub const AddError = _add.AddError;
+pub const add = _add.add;
+pub const addMany = _add.addMany;
+pub const addBatch = _add.addBatch;
+pub const addBatchImpl = _add.addBatchImpl;
 pub const ModifyError = _modify.ModifyError;
 pub const modify = _modify.modify;
 pub const hasComponent = _storage.hasComponent;
 pub const getComponent = _storage.getComponent;
 pub const getComponentMut = _storage.getComponentMut;
+pub const group = _storage.group;
+pub const validateColumns = _storage.validateColumns;
 
 comp_reg: ComponentRegistry,
 arche_reg: Archetype.Registry,

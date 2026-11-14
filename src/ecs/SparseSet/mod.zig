@@ -37,6 +37,35 @@ pub fn iter(self: *@This()) Iter {
     return .{ .set = self };
 }
 
+/// Copies packed values, updates both indices and immediately publishes the new rows.
+/// Borrows the input buffers; ownership of the component values transfers to this set.
+///
+/// # Unsafe
+///
+/// Reserve dense capacity first and extend sparse_to_dense.items to cover every input id.
+/// Entity indices must be unique and unoccupied. Bytes must contain exactly ids.len values.
+pub fn appendBatchAssumeCapacity(
+    self: *@This(),
+    ids: []const Entity.Id,
+    bytes: []const u8,
+) void {
+    const start = self.len();
+    const size = self.meta.size;
+    std.debug.assert(ids.len <= self.capacity() - start);
+    std.debug.assert(bytes.len == ids.len * size);
+    if (size != 0) {
+        const dest = (self.ptr + start * size)[0..bytes.len];
+        @memcpy(dest, bytes);
+    }
+    for (ids, 0..) |id, i| {
+        const index = id.index.get();
+        std.debug.assert(index < self.sparse_to_dense.items.len);
+        std.debug.assert(self.sparse_to_dense.items[index].tryGet() == null);
+        self.sparse_to_dense.items[index] = .from(@intCast(start + i));
+    }
+    self.entity_ids.appendSliceAssumeCapacity(ids);
+}
+
 /// Returns the bytes of the value stored for `id`, or null if the set lacks it.
 pub fn getBytes(self: @This(), id: Entity.Id) ?[]u8 {
     const row = self.denseIndex(id) orelse return null;
@@ -137,6 +166,16 @@ pub fn deinit(self: *@This()) void {
 
     self.sparse_to_dense.deinit(self.allocator);
     self.entity_ids.deinit(self.allocator);
+}
+
+/// Reserves one dense slot and extends the sparse index to cover entity_id.
+/// New sparse entries are invalid; existing mappings and live row counts stay unchanged.
+pub fn reserveForEntity(self: *@This(), entity_id: Entity.Id) Allocator.Error!void {
+    try self.reserve(1);
+    const required = entity_id.index.get() + 1;
+    try self.sparse_to_dense.ensureTotalCapacity(self.allocator, required);
+    while (self.sparse_to_dense.items.len < required)
+        self.sparse_to_dense.appendAssumeCapacity(.invalid);
 }
 
 /// Ensures the dense buffer can hold at least `additional` more elements beyond
