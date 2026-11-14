@@ -14,8 +14,6 @@ const _add = @import("add.zig");
 const _modify = @import("modify.zig");
 const _storage = @import("storage.zig");
 
-pub const AddBundleError = _add.AddBundleError;
-pub const addBundle = _add.addBundle;
 pub const AddError = _add.AddError;
 pub const add = _add.add;
 pub const addMany = _add.addMany;
@@ -140,7 +138,7 @@ test "empty entity access reports metadata and rejects invalid ids" {
     const readonly: *const @This() = &registry;
     try expect(readonly.isEmpty());
     try expectEqual(0, readonly.len());
-    const id = try registry.addBundle(try .init(allocator, .{}));
+    const id = try registry.add(.{});
     try expect(!readonly.isEmpty());
     try expectEqual(1, readonly.len());
     try expect(readonly.contains(id));
@@ -189,16 +187,14 @@ test "remove repairs storage, destroys values once, and retires ids for reuse" {
         inline for (.{ Position, Probe, SparseProbe }) |T| _ = try registry.comp_reg.register(T);
         var ids: [2]Entity.Id = undefined;
         for (&ids, 0..) |*id, i| {
-            id.* = try registry.addBundle(try .init(allocator, .{
+            id.* = try registry.add(.{
                 Position{ .x = @intCast(i), .y = 4 },
                 Probe{ .calls = &archetype_calls },
                 SparseProbe{ .calls = &sparse_calls },
-            }));
+            });
         }
         // The last sparse value belongs to a different archetype.
-        const sparse_only = try registry.addBundle(
-            try .init(allocator, .{SparseProbe{ .calls = &sparse_calls }}),
-        );
+        const sparse_only = try registry.add(.{SparseProbe{ .calls = &sparse_calls }});
         try expect(try registry.remove(ids[0]));
         try expectEqual(1, archetype_calls);
         try expectEqual(1, sparse_calls);
@@ -221,7 +217,7 @@ test "remove repairs storage, destroys values once, and retires ids for reuse" {
         try expect(set.get(SparseProbe, ids[1]) != null);
         try expect(set.get(SparseProbe, sparse_only) != null);
 
-        const reused = try registry.addBundle(try .init(allocator, .{}));
+        const reused = try registry.add(.{});
         try expect(reused.eql(ids[0].nextGeneration()));
         try expect(registry.contains(reused));
         try expect(!try registry.remove(ids[0]));
@@ -239,9 +235,9 @@ test "remove allocation failure preserves the entity and all component values" {
     var registry = init(allocator);
     defer registry.deinit();
     inline for (.{ Probe, Health }) |T| _ = try registry.comp_reg.register(T);
-    const id = try registry.addBundle(try .init(allocator, .{
+    const id = try registry.add(.{
         Probe{ .calls = &calls }, Health{ .value = 17 },
-    }));
+    });
     const archetype = registry.arche_reg.getById(registry.get(id).?.archetype_id).?;
 
     // Only retirement allocation fails; existing allocations still use the same backing allocator.

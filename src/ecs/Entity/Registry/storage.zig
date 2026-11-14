@@ -428,7 +428,7 @@ test "component access rejects absent and invalid ids without creating storage" 
     const position_id = try registry.comp_reg.register(Position);
     const health_id = try registry.comp_reg.register(Health);
     const reserved = try registry.comp_reg.reserve(TypeId.of(Probe));
-    const empty = try registry.addBundle(try .init(allocator, .{}));
+    const empty = try registry.add(.{});
 
     for ([_]CompId{ position_id, health_id, reserved, .invalid, CompId.init(100, 0) }) |comp_id| {
         try expect(!readonly.hasComponent(empty, comp_id));
@@ -438,10 +438,10 @@ test "component access rejects absent and invalid ids without creating storage" 
     try expectEqual(1, registry.arche_reg.entries.items.len);
     try expectEqual(0, registry.sparse_reg.entries.items.len);
 
-    const id = try registry.addBundle(try .init(allocator, .{
+    const id = try registry.add(.{
         Position{ .x = 3, .y = 4 },
         Health{ .value = 7 },
-    }));
+    });
     for ([_]CompId{ position_id, health_id }) |comp_id| {
         const stale = CompId.init(comp_id.index.get(), comp_id.generation.next().get());
         try expect(!readonly.hasComponent(id, stale));

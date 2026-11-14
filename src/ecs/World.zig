@@ -84,23 +84,34 @@ pub fn removeResource(self: *@This(), comptime T: type) bool {
 ///
 /// Every field type must be a component, or a struct marked as a bundle whose fields are
 /// flattened recursively; anything else is a compile error. Component types are registered
-/// before the bundle is built. The entity registry default-constructs missing requirements.
+/// before storage is prepared. Missing requirements are default-constructed per entity.
 ///
 /// On failure the caller keeps ownership of `fields`; successful type registrations remain.
 pub fn addEntity(
     self: *@This(),
     fields: anytype,
-) (Entity.Registry.AddBundleError || ComponentRegistry.RegisterError)!Entity.Id {
-    const types = Bundle.flatTypes(@TypeOf(fields));
-    comptime {
-        for (types) |T| component.assertComponent(T, "addEntity");
-    }
+) Entity.Registry.AddError!Entity.Id {
+    return self.entity_reg.add(fields);
+}
 
-    inline for (types) |T| _ = try self.entity_reg.comp_reg.register(T);
+/// Creates independent entities in input order, stopping at the first error.
+/// Valid output ids identify consumed rows; remaining ids are invalid and inputs stay owned.
+pub fn addEntities(
+    self: *@This(),
+    fields: anytype,
+    ids: *[fields.len]Entity.Id,
+) Entity.Registry.AddError!void {
+    return self.entity_reg.addMany(fields, ids);
+}
 
-    var bundle = try Bundle.init(self.allocator, fields);
-    errdefer bundle.releaseStorage();
-    return self.entity_reg.addBundle(bundle);
+/// Creates entities with identical normalized component sets using column-wise writes.
+/// On error, committed rows remain live; remaining ids are invalid and inputs stay owned.
+pub fn addEntityBatch(
+    self: *@This(),
+    rows: anytype,
+    ids: *[rows.len]Entity.Id,
+) Entity.Registry.AddError!void {
+    return self.entity_reg.addBatch(rows, ids);
 }
 
 pub const ModifyEntityError = Entity.Registry.ModifyError || ComponentRegistry.RegisterError;
@@ -349,7 +360,32 @@ test "component access and modification support zero sized and highly aligned ty
     }
 }
 
-test "addEntity releases the temporary bundle without disposing copied values" {
+test "batch entity helpers store rows and preserve a successful prefix on error" {
+    var world = init(std.testing.allocator, std.testing.io);
+    defer world.deinit();
+    var batch_ids: [2]Entity.Id = undefined;
+    try world.addEntityBatch(.{
+        .{ Position{ .x = 1, .y = 2 }, Health{ .value = 3 } },
+        .{ Health{ .value = 6 }, Position{ .x = 4, .y = 5 } },
+    }, &batch_ids);
+    try expectEqual(1, world.getComponent(batch_ids[0], Position).?.x);
+    try expectEqual(6, world.getComponent(batch_ids[1], Health).?.value);
+
+    var calls: usize = 0;
+    var ids: [3]Entity.Id = undefined;
+    try expectError(error.BufferTooLarge, world.addEntities(.{
+        .{Health{ .value = 9 }},
+        .{Huge{ .calls = &calls }},
+        .{},
+    }, &ids));
+    try expectEqual(9, world.getComponent(ids[0], Health).?.value);
+    try expect(ids[1].eql(.invalid));
+    try expect(ids[2].eql(.invalid));
+    try expectEqual(0, calls);
+    try expectEqual(3, world.entityCount());
+}
+
+test "addEntity and modifyEntity preserve input ownership on layout failure" {
     const allocator = std.testing.allocator;
     var world = init(allocator, std.testing.io);
     defer world.deinit();
@@ -357,7 +393,7 @@ test "addEntity releases the temporary bundle without disposing copied values" {
     var calls: usize = 0;
     var huge: Huge = .{ .calls = &calls };
 
-    // The archetype layout fails after `Bundle.init` has copied the fields.
+    // A failed layout must leave the caller's value owned by the caller.
     try expectError(error.BufferTooLarge, world.addEntity(.{huge}));
     try expect(calls == 0);
 

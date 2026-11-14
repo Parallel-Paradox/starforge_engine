@@ -12,10 +12,17 @@ const TypeId = reflect.TypeId;
 const Parcel = reflect.Parcel;
 const Bundle = reflect.Bundle;
 const TypeMeta = reflect.TypeMeta;
+const Default = reflect.Default;
 
 const Self = ecs.Entity.Registry;
 
-pub const ModifyError = Self.AddBundleError || error{
+pub const ModifyError = Allocator.Error || Archetype.ChunkLayout.Error || Default.Error || error{
+    /// A component id is unknown, stale, or has only been reserved.
+    UnknownComponentType,
+    /// A required component id is unknown, stale, or has only been reserved.
+    UnknownRequirement,
+    /// A missing required component has no default constructor.
+    MissingRequirementDefault,
     /// The entity id is unknown, stale, or retired.
     UnknownEntity,
     /// A component appears more than once in an insertion or removal list.
@@ -344,15 +351,11 @@ fn testModifyAllocationFailures(allocator: Allocator, migrate: bool) !void {
             _ = try registry.comp_reg.register(T);
         var ids: [2]Entity.Id = undefined;
         for (&ids) |*id| {
-            var initial = try Bundle.init(std.testing.allocator, .{
+            id.* = try registry.add(.{
                 Position{ .x = 3, .y = 4 },        Velocity{ .dx = 5, .dy = 6 },
                 Health{ .value = 7 },              Probe{ .calls = &calls[0] },
                 SparseProbe{ .calls = &calls[2] },
             });
-            id.* = registry.addBundle(initial) catch |err| {
-                initial.deinit();
-                return err;
-            };
         }
         const old_arch = registry.get(ids[0]).?.archetype_id;
         var signature = try registry.get(ids[0]).?.signature.clone(std.testing.allocator);
@@ -421,9 +424,7 @@ fn testSharedSignatures(allocator: Allocator) !void {
 
     var ids: [2]Entity.Id = undefined;
     for (&ids) |*id| {
-        var bundle = try Bundle.init(std.testing.allocator, .{Position{ .x = 1, .y = 2 }});
-        errdefer bundle.deinit();
-        id.* = try registry.addBundle(bundle);
+        id.* = try registry.add(.{Position{ .x = 1, .y = 2 }});
     }
     const original_arch = registry.get(ids[0]).?.archetype_id;
     const shared = registry.arche_reg.getById(original_arch).?.meta.signature;
@@ -492,7 +493,7 @@ test "modify validates runtime changes and surviving requirements before consumi
     defer registry.deinit();
     const root = try registry.comp_reg.register(Root);
     const position = registry.comp_reg.idOf(Position).?;
-    const id = try registry.addBundle(try Bundle.init(allocator, .{}));
+    const id = try registry.add(.{});
     var insert = try Bundle.init(allocator, .{Root{}});
     defer insert.deinit();
     try expectError(error.UnknownEntity, registry.modify(.invalid, insert, &.{}));
@@ -517,4 +518,42 @@ test "modify validates runtime changes and surviving requirements before consumi
     try insert.map.ensureTotalCapacity(allocator, 1);
     try registry.modify(id, insert, &.{});
     insert = .{ .allocator = allocator };
+}
+
+test "modify cleans generated defaults when runtime requirement construction fails" {
+    const Root = struct {};
+    const Broken = struct {
+        value: u8,
+        fn wrongSize() u64 {
+            return 42;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var registry = Self.init(allocator);
+    defer registry.deinit();
+    const id = try registry.add(.{});
+    AutoRequirement.created = 0;
+    AutoRequirement.destroyed = 0;
+    const generated = try registry.comp_reg.register(AutoRequirement);
+    const position = try registry.comp_reg.reserve(TypeId.of(Position));
+    const broken = try registry.comp_reg.registerMeta(.{
+        .type_meta = TypeMeta.of(Broken),
+        .default = Default.initWithImpl(u64, Broken.wrongSize),
+    });
+    _ = try registry.comp_reg.registerMeta(.{
+        .type_meta = TypeMeta.of(Root),
+        .require = @constCast(&[_]CompId{ generated, position, broken }),
+    });
+    var insert = try Bundle.init(allocator, .{Root{}});
+    defer insert.deinit();
+    try expectError(error.UnknownRequirement, registry.modify(id, insert, &.{}));
+    _ = try registry.comp_reg.register(Position);
+    try expectError(error.MissingRequirementDefault, registry.modify(id, insert, &.{}));
+    try expectEqual(0, AutoRequirement.created);
+    try insert.insert(Position{ .x = 3, .y = 4 });
+    try expectError(error.BufferSizeMismatch, registry.modify(id, insert, &.{}));
+    try expectEqual(1, AutoRequirement.created);
+    try expectEqual(1, AutoRequirement.destroyed);
+    try expectEqual(2, insert.map.count());
+    try expectEqual(0, registry.get(id).?.signature.mask.count());
 }
