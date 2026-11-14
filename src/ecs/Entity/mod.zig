@@ -3,18 +3,20 @@ const Allocator = std.mem.Allocator;
 
 const engine = @import("engine");
 const ecs = engine.ecs;
-const Id = ecs.Id;
+pub const Id = ecs.Id;
+pub const change = @import("change.zig");
+pub const Change = change.Change;
+pub const Signature = @import("Signature.zig");
+pub const Registry = @import("Registry.zig");
 
-const entity = ecs.entity;
-const Signature = entity.Signature;
-const ArchetypeId = entity.archetype.Id;
-const SparseSetId = entity.sparse_set.Id;
+const Archetype = ecs.Archetype;
+const SparseSet = ecs.SparseSet;
 
 id: Id,
 signature: Signature,
-archetype_id: ArchetypeId,
+archetype_id: Archetype.Id,
 archetype_row: usize,
-sparse_comps: std.ArrayList(SparseSetId),
+sparse_comps: std.ArrayList(SparseSet.Id),
 
 /// Creates an entity that belongs to no archetype and has no components.
 pub fn init(allocator: Allocator, id: Id) @This() {
@@ -31,4 +33,10 @@ pub fn init(allocator: Allocator, id: Id) @This() {
 pub fn deinit(self: *@This(), allocator: Allocator) void {
     self.signature.deinit(allocator);
     self.sparse_comps.deinit(allocator);
+}
+
+test {
+    _ = change;
+    _ = Signature;
+    _ = Registry;
 }

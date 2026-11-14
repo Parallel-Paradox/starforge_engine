@@ -5,17 +5,17 @@ const std = @import("std");
 const engine = @import("engine");
 const ecs = engine.ecs;
 const State = ecs.query.State;
-const ArchetypeIter = ecs.entity.archetype.Iter;
-const SparseSet = ecs.entity.sparse_set.SparseSet;
+const Archetype = ecs.Archetype;
+const SparseSet = ecs.SparseSet;
 
 /// An entity matched by the query's cached archetypes.
-pub const Item = ArchetypeIter.Item;
+pub const Item = Archetype.Iter.Item;
 
 state: *const State,
 /// Index of the cached archetype being walked.
 current_index: usize = 0,
 /// Iterator over the rest of the current archetype.
-iter: ArchetypeIter,
+iter: Archetype.Iter,
 
 /// Returns the next live entity across the cached archetypes, or null once they
 /// are exhausted.

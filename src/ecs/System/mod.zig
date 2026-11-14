@@ -8,8 +8,10 @@ const Allocator = std.mem.Allocator;
 const engine = @import("engine");
 const World = engine.ecs.World;
 const TypeId = engine.reflect.TypeId;
-const Access = @import("Access.zig");
-const param = @import("param.zig");
+pub const Access = @import("Access.zig");
+pub const param = @import("param.zig");
+pub const schedule = @import("schedule/mod.zig");
+pub const Id = engine.ecs.Id;
 
 ptr: *anyopaque,
 vtable: *const VTable,
@@ -319,7 +321,7 @@ test "resource parameters resolve their id during build" {
 test "built systems expose exact component resource and exclusive conflicts" {
     const query = engine.ecs.query;
     const resource = engine.ecs.resource;
-    const EntityId = engine.ecs.entity.Id;
+    const Entity = engine.ecs.Entity;
     const Data = struct {
         pub const se_component: engine.ecs.component.Mark = .{};
         pub const se_resource: resource.Mark = .{};
@@ -336,7 +338,7 @@ test "built systems expose exact component resource and exclusive conflicts" {
             return .{};
         }
     };
-    const ReadQuery = query.Query(struct { EntityId, *const Data, *const Sparse });
+    const ReadQuery = query.Query(struct { Entity.Id, *const Data, *const Sparse });
     const Functions = struct {
         fn read(_: ReadQuery) void {}
         fn write(items: query.Query(struct { *Data })) void {
@@ -345,7 +347,7 @@ test "built systems expose exact component resource and exclusive conflicts" {
         }
         fn withTag(_: query.QueryF(struct { *Data }, query.Filter.With(Tag))) void {}
         fn withoutTag(_: query.QueryF(struct { *Data }, query.Filter.Without(Tag))) void {}
-        fn ids(_: query.Query(struct { EntityId })) void {}
+        fn ids(_: query.Query(struct { Entity.Id })) void {}
         fn res(_: resource.ResMut(Data)) void {}
         fn exclusive(_: *World, _: Allocator, _: std.Io) void {}
         fn local(_: Allocator, _: std.Io) void {}
@@ -424,7 +426,7 @@ test "built systems expose exact component resource and exclusive conflicts" {
     // A second run must refresh the writer's cache to include a new archetype.
     const second = try world.addEntity(.{ Data{ .value = 10 }, Sparse{} });
     try systems[@backingInt(Kind.write)].run(&world);
-    const ReadBack = query.Query(struct { EntityId, *const Data });
+    const ReadBack = query.Query(struct { Entity.Id, *const Data });
     var ctx = ReadBack.Context.init(&world);
     defer ctx.deinit();
     var values = try ReadBack.extract(&ctx);
@@ -492,4 +494,10 @@ test "build checks parameter conflicts that filters may clear" {
     var readers = try Builder(Functions.readers).build(&world);
     defer readers.deinit(&world);
     try expect(readers.access.findSelfConflict() == null);
+}
+
+test {
+    _ = param;
+    _ = schedule;
+    _ = Access;
 }

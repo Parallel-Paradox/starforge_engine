@@ -2,7 +2,7 @@
 //!
 //! `Query(Item)` selects entities containing every component in `Item`;
 //! `QueryF(Item, filters)` adds component-presence filters.
-//! `Item` is a struct or tuple of `*T`, `*const T`, and `EntityId` fields.
+//! `Item` is a struct or tuple of `*T`, `*const T`, and `Entity.Id` fields.
 //!
 //! Queries declare component read/write access and reject overlapping fields
 //! involving a write. Returned pointers may be invalidated by structural changes.
@@ -14,11 +14,10 @@ const engine = @import("engine");
 const ecs = engine.ecs;
 const World = ecs.World;
 const component = ecs.component;
-const entity = ecs.entity;
-const EntityId = entity.Id;
-const ArchetypeId = entity.archetype.Id;
+const Entity = ecs.Entity;
+const Archetype = ecs.Archetype;
 const TypeId = engine.reflect.TypeId;
-const Access = ecs.system.Access;
+const System = ecs.System;
 
 pub const Filter = @import("Filter.zig");
 pub const State = @import("State.zig");
@@ -42,11 +41,11 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
     const field_names = info.field_names;
     const field_types = info.field_types;
 
-    // The component type of each target field, or null for an `EntityId` field.
+    // The component type of each target field, or null for an `Entity.Id` field.
     const comp_types: [field_types.len]?type = blk: {
         var types: [field_types.len]?type = undefined;
         for (field_types, 0..) |F, i| {
-            types[i] = if (F == EntityId) null else @typeInfo(F).pointer.child;
+            types[i] = if (F == Entity.Id) null else @typeInfo(F).pointer.child;
         }
         break :blk types;
     };
@@ -59,7 +58,7 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
         break :blk total;
     };
     const metadata = comptime blk: {
-        var entries: [comp_count]Access.Entry.Spec = undefined;
+        var entries: [comp_count]System.Access.Entry.Spec = undefined;
         var names: [comp_count][]const u8 = undefined;
         var next: usize = 0;
         for (comp_types, field_types, field_names) |maybe, F, name| {
@@ -75,12 +74,12 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
         break :blk .{ .entries = entries, .names = names };
     };
     const entries = metadata.entries;
-    const access_spec: Access.Spec = .{ .shared = .{ .components = .{
+    const access_spec: System.Access.Spec = .{ .shared = .{ .components = .{
         .entries = &entries,
         .filter = comptime accessFilter(&comp_types, filters),
     } } };
     comptime {
-        if (Access.findStaticConflict(&.{access_spec})) |conflict| {
+        if (System.Access.findStaticConflict(&.{access_spec})) |conflict| {
             const a = conflict[0].entry.?.index;
             const b = conflict[1].entry.?.index;
             @compileError(std.fmt.comptimePrint(
@@ -92,7 +91,7 @@ pub fn QueryF(comptime I: type, comptime filters: anytype) type {
 
     return struct {
         pub const Item = I;
-        pub const access: Access.Spec = access_spec;
+        pub const access: System.Access.Spec = access_spec;
 
         /// Cached archetypes owned by the system and shared by every iteration
         /// extracted from it.
@@ -199,7 +198,7 @@ fn accessFilter(
     return Filter.Branch.spec(.all, &children);
 }
 
-/// Asserts that `Item` is a struct or tuple of component pointers and `EntityId` fields.
+/// Asserts that `Item` is a struct or tuple of component pointers and `Entity.Id` fields.
 fn validateTarget(comptime Item: type) void {
     const info = switch (@typeInfo(Item)) {
         .@"struct" => |info| info,
@@ -210,7 +209,7 @@ fn validateTarget(comptime Item: type) void {
     if (info.field_names.len == 0) @compileError("Query target must declare at least one field");
 
     inline for (info.field_names, info.field_types) |name, F| {
-        if (F != EntityId) validatePointerField(name, F);
+        if (F != Entity.Id) validatePointerField(name, F);
     }
 }
 
@@ -219,7 +218,7 @@ fn validatePointerField(comptime name: []const u8, comptime F: type) void {
     const pointer = switch (@typeInfo(F)) {
         .pointer => |pointer| pointer,
         else => @compileError(
-            "Query target field `" ++ name ++ "` must be a component pointer or EntityId",
+            "Query target field `" ++ name ++ "` must be a component pointer or Entity.Id",
         ),
     };
     if (pointer.size != .one) @compileError(
@@ -292,7 +291,7 @@ test "queries yield target fields and write through pointers" {
     // A struct target yields one item per matching entity.
     try expectEqual(2, count(Query(struct { pos: *const Position }), &world));
 
-    const ById = Query(struct { id: EntityId, pos: *const Position });
+    const ById = Query(struct { id: Entity.Id, pos: *const Position });
     var by_id_ctx = ById.Context.init(&world);
     defer by_id_ctx.deinit();
     var by_id = try ById.extract(&by_id_ctx);
@@ -308,15 +307,15 @@ test "queries yield target fields and write through pointers" {
 
     // Mutable targets write into component storage.
     const Mutable = Query(struct { pos: *const Position, vel: *Velocity });
-    const Tuple = Query(struct { EntityId, *const Position, *const Velocity });
+    const Tuple = Query(struct { Entity.Id, *const Position, *const Velocity });
     inline for (.{ Mutable, Tuple }) |Q| {
-        const spec = comptime ecs.system.param.access(Q);
+        const spec = comptime ecs.System.param.access(Q);
         const entries = spec.shared.components.entries;
         try expectEqual(2, entries.len);
         try expectEqual(0, spec.shared.resources.len);
         inline for (entries, .{ Position, Velocity }, 0..) |entry, T, i| {
             try expect(entry.target == T);
-            const mode: Access.Mode = if (Q == Mutable and i == 1) .write else .read;
+            const mode: System.Access.Mode = if (Q == Mutable and i == 1) .write else .read;
             try expectEqual(mode, entry.mode);
         }
     }
@@ -343,7 +342,7 @@ test "queries yield target fields and write through pointers" {
     try expect(tuple.next() == null);
 
     // Duplicate reads and EntityIds may alias, but never grant mutable access.
-    const Shared = Query(struct { EntityId, *const Position, EntityId, *const Position });
+    const Shared = Query(struct { Entity.Id, *const Position, Entity.Id, *const Position });
     var shared_ctx = Shared.Context.init(&world);
     defer shared_ctx.deinit();
     var shared = try Shared.extract(&shared_ctx);
@@ -367,14 +366,14 @@ test "sparse components are matched per entity" {
     _ = try world.addEntity(.{Velocity{ .dx = 5, .dy = 6 }});
 
     const WithHealth = Query(struct {
-        id: EntityId,
+        id: Entity.Id,
         pos: *const Position,
         health: *Health,
     });
-    const spec = comptime ecs.system.param.access(WithHealth);
+    const spec = comptime ecs.System.param.access(WithHealth);
     try expectEqual(2, spec.shared.components.entries.len);
     try expect(spec.shared.components.entries[1].target == Health);
-    try expectEqual(Access.Mode.write, spec.shared.components.entries[1].mode);
+    try expectEqual(System.Access.Mode.write, spec.shared.components.entries[1].mode);
     var with_health_ctx = WithHealth.Context.init(&world);
     defer with_health_ctx.deinit();
     var with_health = try WithHealth.extract(&with_health_ctx);
@@ -387,7 +386,7 @@ test "sparse components are matched per entity" {
     try expect(with_health.next() == null);
 
     // Sparse-only targets visit entities across different archetypes.
-    const Healths = Query(struct { id: EntityId, health: *const Health });
+    const Healths = Query(struct { id: Entity.Id, health: *const Health });
     var healths_ctx = Healths.Context.init(&world);
     defer healths_ctx.deinit();
     var healths = try Healths.extract(&healths_ctx);
@@ -406,12 +405,12 @@ test "sparse components are matched per entity" {
     try expectEqual(2, count(Query(struct { pos: *const Position }), &world));
 
     // A sparse filter is decided per entity, not per archetype.
-    try expectEqual(2, count(QueryF(struct { id: EntityId }, .{With(Health)}), &world));
-    try expectEqual(2, count(QueryF(struct { id: EntityId }, .{Without(Health)}), &world));
+    try expectEqual(2, count(QueryF(struct { id: Entity.Id }, .{With(Health)}), &world));
+    try expectEqual(2, count(QueryF(struct { id: Entity.Id }, .{Without(Health)}), &world));
 
     // An archetype-stored match decides the whole archetype before the sparse check.
     try expectEqual(3, count(
-        QueryF(struct { id: EntityId }, .{Any(.{
+        QueryF(struct { id: Entity.Id }, .{Any(.{
             With(Position),
             With(Health),
         })}),
@@ -420,7 +419,7 @@ test "sparse components are matched per entity" {
 
     // `Without` accepts the archetypes that lack Position regardless of Health.
     try expectEqual(3, count(
-        QueryF(struct { id: EntityId }, .{Any(.{
+        QueryF(struct { id: Entity.Id }, .{Any(.{
             Without(Position),
             With(Health),
         })}),
@@ -428,7 +427,7 @@ test "sparse components are matched per entity" {
     ));
 
     // An archetype-stored and a sparse requirement together narrow to one entity.
-    const BothRequired = QueryF(struct { id: EntityId }, .{
+    const BothRequired = QueryF(struct { id: Entity.Id }, .{
         With(.{ Position, Health }),
     });
     var both_required_ctx = BothRequired.Context.init(&world);
@@ -480,14 +479,14 @@ test "filters narrow the archetypes a query visits" {
     ));
 
     // `With` yields the moving entity, `Without` yields the other two in archetype order.
-    const WithVelocity = QueryF(struct { id: EntityId }, .{With(Velocity)});
+    const WithVelocity = QueryF(struct { id: Entity.Id }, .{With(Velocity)});
     var with_velocity_ctx = WithVelocity.Context.init(&world);
     defer with_velocity_ctx.deinit();
     var with_velocity = try WithVelocity.extract(&with_velocity_ctx);
     try expect(with_velocity.next().?.id.eql(moving));
     try expect(with_velocity.next() == null);
 
-    const WithoutVelocity = QueryF(struct { id: EntityId }, .{
+    const WithoutVelocity = QueryF(struct { id: Entity.Id }, .{
         Without(Velocity),
     });
     var without_velocity_ctx = WithoutVelocity.Context.init(&world);
@@ -501,7 +500,7 @@ test "filters narrow the archetypes a query visits" {
 test "filters do not remove declared component access" {
     const Q = QueryF(struct { *Position }, Without(Velocity));
     const components = Q.access.shared.components;
-    try expectEqual(Access.Mode.write, components.entries[0].mode);
+    try expectEqual(System.Access.Mode.write, components.entries[0].mode);
 
     // The access condition requires the target components and keeps the user filter.
     const filter = components.filter.?;
@@ -515,7 +514,7 @@ test "filters do not remove declared component access" {
     // Targets alone are a plain requirement, and entity ids alone match everything.
     const Plain = Query(struct { *Position });
     try expect(Plain.access.shared.components.filter.?.leaf.component == Position);
-    const Ids = Query(struct { EntityId });
+    const Ids = Query(struct { Entity.Id });
     try expect(Ids.access.shared.components.filter == null);
 }
 
@@ -549,7 +548,7 @@ test "extract refreshes the cached archetypes" {
 
     // An evicted change-log window forces a full rebuild instead.
     const log = &world.archeReg().change_log;
-    log.record(ArchetypeId.init(0, 0));
+    log.record(Archetype.Id.init(0, 0));
     log.oldest_ver = ctx.version + 1;
 
     query = try Positions.extract(&ctx);
@@ -582,7 +581,7 @@ test "queries walk every chunk of an archetype" {
     }
 
     const Chunked = Query(struct {
-        id: EntityId,
+        id: Entity.Id,
         big: *Big,
         small: *const Small,
     });

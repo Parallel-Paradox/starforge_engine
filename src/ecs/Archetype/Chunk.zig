@@ -4,15 +4,13 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const engine = @import("engine");
-const archetype = engine.ecs.entity.archetype;
+const Archetype = engine.ecs.Archetype;
 const AlignedBuffer = engine.base.AlignedBuffer;
-const Layout = archetype.ChunkLayout;
-const Meta = archetype.Meta;
 
 /// The metadata describing the archetype of this chunk, including its columns and their types.
-meta: *const Meta,
+meta: *const Archetype.Meta,
 /// The layout of the chunk's buffer, including offsets and sizes of component columns.
-layout: *const Layout,
+layout: *const Archetype.ChunkLayout,
 ptr: [*]u8,
 /// The number of valid entities in this chunk.
 len: usize = 0,
@@ -20,8 +18,8 @@ len: usize = 0,
 /// Allocates the chunk's buffer. Free it with `deinit`.
 pub fn init(
     allocator: Allocator,
-    meta: *const Meta,
-    layout: *const Layout,
+    meta: *const Archetype.Meta,
+    layout: *const Archetype.ChunkLayout,
 ) Allocator.Error!@This() {
     const buffer = try AlignedBuffer.init(allocator, layout.size, layout.alignment);
     return .{
@@ -77,9 +75,9 @@ test "init allocates the layout buffer and deinit frees it" {
     defer registry.deinit();
     const wide = try registry.register(Wide);
 
-    var meta = try Meta.init(allocator, &.{wide}, registry);
+    var meta = try Archetype.Meta.init(allocator, &.{wide}, registry);
     defer meta.deinit(allocator);
-    var layout = try Layout.initWithCapacity(allocator, meta, 3);
+    var layout = try Archetype.ChunkLayout.initWithCapacity(allocator, meta, 3);
     defer layout.deinit(allocator);
 
     var chunk = try init(allocator, &meta, &layout);
@@ -100,9 +98,9 @@ test "init does not allocate a zero-sized layout" {
 
     var registry = CompRegistry.init(allocator);
     defer registry.deinit();
-    var meta = try Meta.init(allocator, &.{}, registry);
+    var meta = try Archetype.Meta.init(allocator, &.{}, registry);
     defer meta.deinit(allocator);
-    var layout = try Layout.initWithCapacity(allocator, meta, 8);
+    var layout = try Archetype.ChunkLayout.initWithCapacity(allocator, meta, 8);
     defer layout.deinit(allocator);
 
     var chunk = try init(allocator, &meta, &layout);
@@ -130,9 +128,9 @@ test "deinit runs managed component deinit for every live entity" {
     defer registry.deinit();
     const managed = try registry.register(Managed);
 
-    var meta = try Meta.init(allocator, &.{managed}, registry);
+    var meta = try Archetype.Meta.init(allocator, &.{managed}, registry);
     defer meta.deinit(allocator);
-    var layout = try Layout.initWithCapacity(allocator, meta, 4);
+    var layout = try Archetype.ChunkLayout.initWithCapacity(allocator, meta, 4);
     defer layout.deinit(allocator);
 
     var calls: usize = 0;

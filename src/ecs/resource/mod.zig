@@ -5,7 +5,7 @@
 
 const engine = @import("engine");
 const World = engine.ecs.World;
-const Access = engine.ecs.system.Access;
+const System = engine.ecs.System;
 
 pub const Id = engine.ecs.Id;
 pub const Registry = @import("Registry.zig");
@@ -51,7 +51,7 @@ fn ResourceParam(comptime T: type, comptime mutable: bool) type {
     return struct {
         ptr: if (mutable) *T else *const T,
 
-        pub const access: Access.Spec = .{ .shared = .{ .resources = &.{
+        pub const access: System.Access.Spec = .{ .shared = .{ .resources = &.{
             .{ .target = T, .mode = if (mutable) .write else .read },
         } } };
 
@@ -86,14 +86,14 @@ test {
 
 test "resource parameters cache their id and borrow shared storage" {
     const testing = @import("std").testing;
-    const param = engine.ecs.system.param;
+    const param = engine.ecs.System.param;
     const Counter = struct {
         pub const se_resource: Mark = .{};
         value: u32,
     };
     inline for (
         .{ Res(Counter), ResMut(Counter) },
-        [_]Access.Mode{ .read, .write },
+        [_]System.Access.Mode{ .read, .write },
     ) |P, mode| {
         const spec = comptime param.access(P);
         try testing.expectEqual(0, spec.shared.components.entries.len);

@@ -3,9 +3,8 @@
 const std = @import("std");
 
 const engine = @import("engine");
-const entity = engine.ecs.entity;
-const EntityId = entity.Id;
-const Archetype = entity.archetype.Archetype;
+const Entity = engine.ecs.Entity;
+const Archetype = engine.ecs.Archetype;
 
 archetype: *Archetype,
 /// Global row of the next entity to yield.
@@ -18,7 +17,7 @@ row_in_chunk: usize = 0,
 /// A slot with access to its component columns and id. Unused slots must be
 /// initialized before reading. Storage growth or row removal invalidates the item.
 pub const Item = struct {
-    id: *EntityId,
+    id: *Entity.Id,
     /// Index of the chunk holding this entity.
     chunk_index: usize,
     /// Row of this entity inside `chunk_index`.
@@ -118,7 +117,7 @@ test "next returns null for an empty archetype" {
 
     try arch.reserve(1);
     var unused = arch.iterUnused();
-    unused.nextStorage().?.id.* = EntityId.init(0, 1);
+    unused.nextStorage().?.id.* = Entity.Id.init(0, 1);
     try expect(unused.nextStorage() == null);
     try expectEqual(0, arch.len());
     try expectEqual(0, arch.chunks.items[0].len);
@@ -143,7 +142,7 @@ test "iter visits live and unused slots across chunks and exposes their columns"
     try expectEqual(3, arch.ids.capacity);
     try expectEqual(3, arch.capacity());
 
-    _ = arch.appendUninitAssumeCapacity(EntityId.init(0, 1));
+    _ = arch.appendUninitAssumeCapacity(Entity.Id.init(0, 1));
     @memset(arch.at(0, 0).data, 0);
     @memset(arch.at(1, 0).data, 0);
     var unused = arch.iterUnused();
@@ -153,7 +152,7 @@ test "iter visits live and unused slots across chunks and exposes their columns"
         try expectEqual(filled / 2, item.chunk_index);
         try expectEqual(filled % 2, item.row_in_chunk);
         try expectEqual(&arch.ids.allocatedSlice()[filled], item.id);
-        item.id.* = EntityId.init(@intCast(filled), 1);
+        item.id.* = Entity.Id.init(@intCast(filled), 1);
         @memset(item.column(0), 0);
         @memset(item.column(1), 0);
     }
@@ -169,7 +168,7 @@ test "iter visits live and unused slots across chunks and exposes their columns"
     const last = boundary.nextStorage().?;
     try expectEqual(1, last.chunk_index);
     try expectEqual(0, last.row_in_chunk);
-    try expect(last.id.eql(EntityId.init(2, 1)));
+    try expect(last.id.eql(Entity.Id.init(2, 1)));
     arch.ids.items.len = filled;
     arch.chunks.items[1].len = 1;
 
@@ -181,11 +180,11 @@ test "iter visits live and unused slots across chunks and exposes their columns"
 
     var it = arch.iter();
     const first = it.next().?;
-    try expect(first.id.eql(EntityId.init(0, 1)));
+    try expect(first.id.eql(Entity.Id.init(0, 1)));
 
     var visited: usize = 1;
     while (it.next()) |item| : (visited += 1) {
-        try expect(item.id.eql(EntityId.init(@intCast(visited), 1)));
+        try expect(item.id.eql(Entity.Id.init(@intCast(visited), 1)));
         item.column(0)[0] = @intCast(visited + 1);
         item.column(1)[0] = @intCast(visited + 10);
     }

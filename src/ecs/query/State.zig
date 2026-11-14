@@ -11,10 +11,9 @@ const ecs = engine.ecs;
 const World = ecs.World;
 const CompId = ecs.component.Id;
 const Storage = ecs.component.Storage;
-const Signature = ecs.entity.Signature;
-const ArchetypeId = ecs.entity.archetype.Id;
-const ArchetypeRegistry = ecs.entity.archetype.Registry;
-const SparseSetId = ecs.entity.sparse_set.Id;
+const Entity = ecs.Entity;
+const Archetype = ecs.Archetype;
+const SparseSet = ecs.SparseSet;
 const Filter = ecs.query.Filter;
 const Iter = ecs.query.Iter;
 const TypeId = engine.reflect.TypeId;
@@ -29,11 +28,11 @@ pub const Target = struct {
     storage: Storage,
     /// Sparse set id resolved by `update`; invalid when the component is
     /// archetype-stored or no sparse set exists yet.
-    sparse_id: SparseSetId = .invalid,
+    sparse_id: SparseSet.Id = .invalid,
 };
 
 pub const Cache = struct {
-    id: ArchetypeId,
+    id: Archetype.Id,
     /// Whether entities in this archetype need sparse-set filter checks.
     needs_entity_filter: bool = false,
     /// Column index in this archetype for each query target field.
@@ -157,8 +156,8 @@ pub fn rebuild(self: *@This()) Allocator.Error!void {
 /// Applies one change-log entry to the cached archetype list.
 fn applyChange(
     self: *@This(),
-    registry: *ArchetypeRegistry,
-    id: ArchetypeId,
+    registry: *Archetype.Registry,
+    id: Archetype.Id,
 ) Allocator.Error!void {
     const index = id.index.tryGet() orelse return;
 
@@ -177,7 +176,7 @@ fn applyChange(
 /// archetype-stored target field. Returns whether the entry was cached.
 fn insert(
     self: *@This(),
-    entry: *const ArchetypeRegistry.Entry,
+    entry: *const Archetype.Registry.Entry,
 ) Allocator.Error!bool {
     const archetype = &entry.archetype;
     const decision = self.classify(archetype.meta.signature) orelse return false;
@@ -203,7 +202,7 @@ fn insert(
 
 /// Returns the filter decision for the archetype with signature `sig`, or null when
 /// the signature does not satisfy the query targets or filters.
-fn classify(self: *const @This(), sig: Signature) ?Filter.Decision {
+fn classify(self: *const @This(), sig: Entity.Signature) ?Filter.Decision {
     for (self.targets.?) |maybe| {
         const target = maybe orelse continue;
         if (target.storage == .archetype and !sig.has(target.id)) return null;
@@ -215,7 +214,7 @@ fn classify(self: *const @This(), sig: Signature) ?Filter.Decision {
 }
 
 /// Removes a cached archetype by its full id, including generation, if present.
-fn remove(self: *@This(), id: ArchetypeId) void {
+fn remove(self: *@This(), id: Archetype.Id) void {
     for (self.caches.items, 0..) |entry, i| {
         if (entry.id.eql(id)) {
             self.world.allocator.free(entry.columns);

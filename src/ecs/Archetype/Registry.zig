@@ -2,16 +2,13 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const engine = @import("engine");
-const archetype = engine.ecs.entity.archetype;
-const ArchetypeId = archetype.Id;
-const Archetype = archetype.Archetype;
-const Layout = archetype.ChunkLayout;
-const Signature = engine.ecs.entity.Signature;
+const Archetype = engine.ecs.Archetype;
+const Entity = engine.ecs.Entity;
 const CompId = engine.ecs.component.Id;
 const CompRegistry = engine.ecs.component.Registry;
 
 pub const Entry = struct {
-    id: ArchetypeId,
+    id: Archetype.Id,
     archetype: Archetype,
 };
 
@@ -21,7 +18,7 @@ pub const ChangeLog = struct {
     const capacity = 1024;
 
     /// Archetype ids indexed by change version modulo `capacity`.
-    buf: [capacity]ArchetypeId = @splat(ArchetypeId.invalid),
+    buf: [capacity]Archetype.Id = @splat(Archetype.Id.invalid),
     /// Version of the oldest change still retained in `buf`.
     oldest_ver: usize = 0,
     /// Version of the next change to be recorded (the exclusive end).
@@ -29,7 +26,7 @@ pub const ChangeLog = struct {
 
     /// Records `id` as the change at `next_ver` and advances the version, evicting the
     /// oldest entry once the buffer is full.
-    pub fn record(self: *@This(), id: ArchetypeId) void {
+    pub fn record(self: *@This(), id: Archetype.Id) void {
         self.buf[self.next_ver % capacity] = id;
         self.next_ver +%= 1;
 
@@ -40,16 +37,16 @@ pub const ChangeLog = struct {
 
     /// Returns the change recorded at `ver`, or null if it has not been recorded yet or
     /// has already been evicted.
-    pub fn get(self: *const @This(), ver: usize) ?ArchetypeId {
+    pub fn get(self: *const @This(), ver: usize) ?Archetype.Id {
         if (ver < self.oldest_ver or ver >= self.next_ver) return null;
         return self.buf[ver % capacity];
     }
 };
 
-/// `Signature` -> archetype id.
-signature_to_id: Signature.Lookup(ArchetypeId),
+/// `Entity.Signature` -> archetype id.
+signature_to_id: Entity.Signature.Lookup(Archetype.Id),
 entries: std.ArrayList(Entry),
-retired: std.ArrayList(ArchetypeId),
+retired: std.ArrayList(Archetype.Id),
 change_log: ChangeLog = .{},
 allocator: Allocator,
 
@@ -78,7 +75,7 @@ pub fn deinit(self: *@This()) void {
 
 /// Returns the archetype registered for `id`, or null if it is unknown.
 /// The pointer is invalidated when another archetype is registered.
-pub fn getById(self: *@This(), id: ArchetypeId) ?*Archetype {
+pub fn getById(self: *@This(), id: Archetype.Id) ?*Archetype {
     const index = id.index.tryGet() orelse return null;
     if (index >= self.entries.items.len) return null;
 
@@ -89,7 +86,7 @@ pub fn getById(self: *@This(), id: ArchetypeId) ?*Archetype {
 
 /// Returns the entry for the archetype storing exactly `signature`, or null if it is
 /// unknown. The pointer is invalidated when another archetype is registered.
-pub fn getBySig(self: *@This(), signature: Signature) ?*Entry {
+pub fn getBySig(self: *@This(), signature: Entity.Signature) ?*Entry {
     const id = self.signature_to_id.get(signature) orelse return null;
     const index = id.index.tryGet() orelse return null;
     if (index >= self.entries.items.len) return null;
@@ -106,8 +103,8 @@ pub fn getOrCreate(
     self: *@This(),
     ids: []const CompId,
     components: CompRegistry,
-) (Allocator.Error || Layout.Error)!*Entry {
-    var signature = Signature.init(self.allocator);
+) (Allocator.Error || Archetype.ChunkLayout.Error)!*Entry {
+    var signature = Entity.Signature.init(self.allocator);
     defer signature.deinit(self.allocator);
     try signature.add(self.allocator, ids);
 
@@ -123,7 +120,7 @@ pub fn getOrCreate(
     const id = if (reuse)
         self.retired.getLast()
     else
-        ArchetypeId.init(self.entries.items.len, 0);
+        Archetype.Id.init(self.entries.items.len, 0);
     if (reuse) _ = self.retired.pop();
 
     const entry: Entry = .{ .id = id, .archetype = arch };
@@ -144,7 +141,7 @@ pub fn getOrCreate(
 /// # Errors
 ///
 /// Returns an allocator error if the retired-id list cannot grow.
-pub fn remove(self: *@This(), id: ArchetypeId) Allocator.Error!void {
+pub fn remove(self: *@This(), id: Archetype.Id) Allocator.Error!void {
     const index = id.index.tryGet() orelse return;
     if (index >= self.entries.items.len) return;
 
@@ -239,12 +236,12 @@ test "getOrCreate registers, reuses, and looks up archetypes" {
     const registry = &fixture.registry;
 
     // Unknown ids and signatures are not found.
-    var unknown = Signature.init(allocator);
+    var unknown = Entity.Signature.init(allocator);
     defer unknown.deinit(allocator);
     try unknown.add(allocator, &.{fixture.velocity});
     try expect(registry.getBySig(unknown) == null);
-    try expect(registry.getById(ArchetypeId.init(0, 0)) == null);
-    try expect(registry.getById(ArchetypeId.invalid) == null);
+    try expect(registry.getById(Archetype.Id.init(0, 0)) == null);
+    try expect(registry.getById(Archetype.Id.invalid) == null);
 
     const empty_id = (try registry.getOrCreate(&.{}, fixture.components)).id;
     try expectEqual(0, registry.getById(empty_id).?.len());
@@ -294,8 +291,8 @@ test "remove releases an archetype, retires its id, and logs the removal" {
 
     // Removing it again, or removing unknown ids, is a no-op.
     try registry.remove(old_id);
-    try registry.remove(ArchetypeId.invalid);
-    try registry.remove(ArchetypeId.init(42, 0));
+    try registry.remove(Archetype.Id.invalid);
+    try registry.remove(Archetype.Id.init(42, 0));
     try expectEqual(2, registry.change_log.next_ver);
     try expectEqual(1, registry.retired.items.len);
 
@@ -317,20 +314,20 @@ test "change log wraps and evicts the oldest versions" {
     var log: ChangeLog = .{};
 
     for (0..ChangeLog.capacity + 3) |index| {
-        log.record(ArchetypeId.init(@intCast(index), 0));
+        log.record(Archetype.Id.init(@intCast(index), 0));
     }
 
     try expectEqual(ChangeLog.capacity + 3, log.next_ver);
     try expectEqual(3, log.oldest_ver);
 
     // Version 1024 overwrote slot 0; version 3 is now the oldest retained event.
-    try expect(log.buf[0].eql(ArchetypeId.init(ChangeLog.capacity, 0)));
-    try expect(log.buf[3].eql(ArchetypeId.init(3, 0)));
+    try expect(log.buf[0].eql(Archetype.Id.init(ChangeLog.capacity, 0)));
+    try expect(log.buf[3].eql(Archetype.Id.init(3, 0)));
 
     // Evicted versions are no longer readable, while the retained range is.
     try expect(log.get(0) == null);
     try expect(log.get(2) == null);
-    try expect(log.get(3).?.eql(ArchetypeId.init(3, 0)));
-    try expect(log.get(ChangeLog.capacity + 2).?.eql(ArchetypeId.init(ChangeLog.capacity + 2, 0)));
+    try expect(log.get(3).?.eql(Archetype.Id.init(3, 0)));
+    try expect(log.get(ChangeLog.capacity + 2).?.eql(Archetype.Id.init(ChangeLog.capacity + 2, 0)));
     try expect(log.get(ChangeLog.capacity + 3) == null);
 }

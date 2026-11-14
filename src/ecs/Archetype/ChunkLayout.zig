@@ -5,7 +5,7 @@ const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
 
 const engine = @import("engine");
-const Meta = engine.ecs.entity.archetype.Meta;
+const Archetype = engine.ecs.Archetype;
 
 /// Number of entities (and elements per column array) the buffer can hold.
 capacity: usize,
@@ -35,7 +35,7 @@ pub const Error = error{
 /// Returns `BufferTooLarge` if the computed buffer size exceeds max_size_byte.
 pub fn initWithCapacity(
     allocator: Allocator,
-    meta: Meta,
+    meta: Archetype.Meta,
     capacity: usize,
 ) (Allocator.Error || Error)!@This() {
     var self: @This() = .{
@@ -61,7 +61,7 @@ pub fn initWithCapacity(
 pub fn resetCapacity(
     self: *@This(),
     allocator: Allocator,
-    meta: Meta,
+    meta: Archetype.Meta,
     capacity: usize,
 ) (Allocator.Error || Error)!void {
     const alignment = meta.alignment();
@@ -113,7 +113,7 @@ pub fn resetCapacity(
 /// Returns `BufferTooLarge` if the computed buffer size exceeds max_size_byte.
 pub fn initWithSize(
     allocator: Allocator,
-    meta: Meta,
+    meta: Archetype.Meta,
     size: usize,
 ) (Allocator.Error || Error)!@This() {
     var self: @This() = .{
@@ -140,7 +140,7 @@ pub fn initWithSize(
 pub fn resetSize(
     self: *@This(),
     allocator: Allocator,
-    meta: Meta,
+    meta: Archetype.Meta,
     size: usize,
 ) (Allocator.Error || Error)!void {
     if (size > max_size_byte) return Error.BufferTooLarge;
@@ -199,7 +199,7 @@ const Tag = struct {
 };
 
 /// Builds a meta holding `Components`, in registration order.
-fn testMeta(allocator: Allocator, comptime Components: []const type) !Meta {
+fn testMeta(allocator: Allocator, comptime Components: []const type) !Archetype.Meta {
     var registry = CompRegistry.init(allocator);
     defer registry.deinit();
 
@@ -207,7 +207,7 @@ fn testMeta(allocator: Allocator, comptime Components: []const type) !Meta {
     inline for (Components, 0..) |Component, i| {
         ids[i] = try registry.register(Component);
     }
-    return Meta.init(allocator, &ids, registry);
+    return Archetype.Meta.init(allocator, &ids, registry);
 }
 
 fn expectLayout(

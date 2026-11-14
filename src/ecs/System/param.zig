@@ -4,7 +4,7 @@ const Allocator = std.mem.Allocator;
 const engine = @import("engine");
 const World = engine.ecs.World;
 const query = engine.ecs.query;
-const Access = engine.ecs.system.Access;
+const System = engine.ecs.System;
 
 /// The storage a parameter keeps between extractions; `World` when it needs
 /// none, including for parameters that are not declarations-bearing types.
@@ -55,7 +55,7 @@ fn assertContext(comptime C: type) void {
 ///
 /// `*World`, `Allocator`, and `Io` are accepted directly. Other parameters must
 /// provide `extract`. Declared contexts must satisfy `assertContext`, and access
-/// declarations must have type `Access.Spec`.
+/// declarations must have type `System.Access.Spec`.
 pub fn assertParam(comptime P: type) void {
     if (P == *World or P == Allocator or P == std.Io) return;
 
@@ -70,15 +70,15 @@ pub fn assertParam(comptime P: type) void {
 
     if (@hasDecl(P, "Context")) assertContext(P.Context);
     if (@hasDecl(P, "access")) {
-        if (@TypeOf(P.access) != Access.Spec) {
-            @compileError(@typeName(P) ++ ".access must have type Access.Spec");
+        if (@TypeOf(P.access) != System.Access.Spec) {
+            @compileError(@typeName(P) ++ ".access must have type System.Access.Spec");
         }
     }
 }
 
 /// Returns a parameter's comptime access declaration without extracting it.
 /// Missing declarations are exclusive; `.none` must be declared explicitly.
-pub fn access(comptime P: type) Access.Spec {
+pub fn access(comptime P: type) System.Access.Spec {
     assertParam(P);
     if (P == *World) return .exclusive;
     if (P == Allocator or P == std.Io) return .none;
@@ -106,11 +106,11 @@ test "Context is World for builtins and parameters without one" {
 }
 
 test "query contexts satisfy the Context contract" {
-    const Q = query.Query(struct { engine.ecs.entity.Id });
+    const Q = query.Query(struct { engine.ecs.Entity.Id });
     try expect(Context(Q) == query.State);
     const spec = comptime access(Q);
     try expectEqual(0, spec.shared.components.entries.len);
-    const exclusive: Access.Spec = .exclusive;
+    const exclusive: System.Access.Spec = .exclusive;
     try expect(spec.isConflict(exclusive));
 }
 
@@ -135,14 +135,14 @@ test "access validates declarations and defaults undeclared parameters to exclus
         }
     };
     const Local = struct {
-        pub const access: Access.Spec = .none;
+        pub const access: System.Access.Spec = .none;
 
         pub fn extract(_: *World) error{}!@This() {
             return .{};
         }
     };
     const Declared = struct {
-        pub const access: Access.Spec = .{ .shared = .{ .resources = &.{
+        pub const access: System.Access.Spec = .{ .shared = .{ .resources = &.{
             .{ .target = u32, .mode = .write },
         } } };
 
@@ -162,7 +162,7 @@ test "access validates declarations and defaults undeclared parameters to exclus
     try expectEqual(1, declared.shared.resources.len);
     const entry = declared.shared.resources[0];
     try expect(entry.target == u32);
-    try expectEqual(Access.Mode.write, entry.mode);
+    try expectEqual(System.Access.Mode.write, entry.mode);
 
     // Compile errors: invalid parameter or incorrectly typed access declaration.
     // assertParam(u32);
@@ -192,7 +192,7 @@ test "builtins borrow the World and inject allocator and Io by value" {
             injected_io.random(bytes);
         }
     };
-    var system = try engine.ecs.system.System.Builder(Run.run).build(&world);
+    var system = try engine.ecs.System.Builder(Run.run).build(&world);
     defer system.deinit(&world);
     try system.run(&world);
 }

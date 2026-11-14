@@ -6,18 +6,20 @@ const AlignedBuffer = engine.base.AlignedBuffer;
 const NonMax = engine.base.niche.NonMax;
 const TypeMeta = engine.reflect.TypeMeta;
 const TypeId = engine.reflect.TypeId;
-const EntityId = engine.ecs.entity.Id;
-const Iter = engine.ecs.entity.sparse_set.Iter;
+const Entity = engine.ecs.Entity;
+pub const Id = engine.ecs.Id;
+pub const Iter = @import("Iter.zig");
+pub const Registry = @import("Registry.zig");
 
 pub const DenseId = NonMax(u32);
 
 meta: TypeMeta,
-/// `EntityId.index` to `DenseId` mapping.
+/// `Entity.Id.index` to `DenseId` mapping.
 sparse_to_dense: std.ArrayList(DenseId),
 /// Dense data pointer.
 ptr: [*]u8,
 /// Dense array to sparse entity ids.
-entity_ids: std.ArrayList(EntityId),
+entity_ids: std.ArrayList(Entity.Id),
 allocator: Allocator,
 
 /// The number of entities in the sparse set.
@@ -36,13 +38,13 @@ pub fn iter(self: *@This()) Iter {
 }
 
 /// Returns the bytes of the value stored for `id`, or null if the set lacks it.
-pub fn getBytes(self: @This(), id: EntityId) ?[]u8 {
+pub fn getBytes(self: @This(), id: Entity.Id) ?[]u8 {
     const row = self.denseIndex(id) orelse return null;
     return (self.ptr + row * self.meta.size)[0..self.meta.size];
 }
 
 /// Returns the typed value stored for `id`, or null if the set lacks it.
-pub fn get(self: @This(), comptime T: type, id: EntityId) ?*T {
+pub fn get(self: @This(), comptime T: type, id: Entity.Id) ?*T {
     std.debug.assert(self.meta.id.eql(TypeId.of(T)));
     const bytes = self.getBytes(id) orelse return null;
     return @ptrCast(@alignCast(bytes.ptr));
@@ -50,7 +52,7 @@ pub fn get(self: @This(), comptime T: type, id: EntityId) ?*T {
 
 /// Destroys the value for the full entity id and fills its slot with the last
 /// value without destroying it. Returns false if absent; retains all capacity.
-pub fn remove(self: *@This(), id: EntityId) bool {
+pub fn remove(self: *@This(), id: Entity.Id) bool {
     const row = self.denseIndex(id) orelse return false;
     const last = self.len() - 1;
     const removed_ptr = self.ptr + row * self.meta.size;
@@ -73,7 +75,7 @@ pub fn remove(self: *@This(), id: EntityId) bool {
 }
 
 /// Returns the dense row holding `id`, or null if the set lacks it.
-fn denseIndex(self: @This(), id: EntityId) ?usize {
+fn denseIndex(self: @This(), id: Entity.Id) ?usize {
     const index = id.index.tryGet() orelse return null;
     if (index >= self.sparse_to_dense.items.len) return null;
 
@@ -217,8 +219,8 @@ test "reserve doubles capacity, preserves values, and skips needless growth" {
     var set = try initWithCapacity(allocator, meta, 2);
     defer set.deinit();
 
-    set.entity_ids.appendAssumeCapacity(EntityId.init(0, 1));
-    set.entity_ids.appendAssumeCapacity(EntityId.init(1, 1));
+    set.entity_ids.appendAssumeCapacity(Entity.Id.init(0, 1));
+    set.entity_ids.appendAssumeCapacity(Entity.Id.init(1, 1));
 
     const old_ptr = set.ptr;
     const values: [*]u32 = @ptrCast(@alignCast(set.ptr));
@@ -258,7 +260,7 @@ test "reserve relocates managed values and deinit destroys every live value" {
         var set = try initWithCapacity(allocator, meta, 1);
         defer set.deinit();
 
-        set.entity_ids.appendAssumeCapacity(EntityId.init(0, 1));
+        set.entity_ids.appendAssumeCapacity(Entity.Id.init(0, 1));
         const first: *Managed = @ptrCast(@alignCast(set.ptr));
         first.* = .{ .calls = &calls };
 
@@ -270,7 +272,7 @@ test "reserve relocates managed values and deinit destroys every live value" {
         const moved: *Managed = @ptrCast(@alignCast(set.ptr));
         try expectEqual(&calls, moved.calls);
 
-        set.entity_ids.appendAssumeCapacity(EntityId.init(1, 1));
+        set.entity_ids.appendAssumeCapacity(Entity.Id.init(1, 1));
         const second: *Managed = @ptrCast(@alignCast(set.ptr + meta.size));
         second.* = .{ .calls = &calls };
     }
@@ -292,7 +294,7 @@ test "initWithCapacity grows zero-sized types without a dense allocation" {
     try expect(meta.alignment.check(@intFromPtr(set.ptr)));
 
     for (0..4) |index| {
-        set.entity_ids.appendAssumeCapacity(EntityId.init(@intCast(index), 1));
+        set.entity_ids.appendAssumeCapacity(Entity.Id.init(@intCast(index), 1));
     }
     try set.reserve(1);
 
@@ -311,23 +313,23 @@ test "get returns the value for an entity and null when absent" {
     set.sparse_to_dense.appendAssumeCapacity(.from(0));
     set.sparse_to_dense.appendAssumeCapacity(.invalid);
 
-    set.entity_ids.appendAssumeCapacity(EntityId.init(0, 1));
-    set.entity_ids.appendAssumeCapacity(EntityId.init(1, 1));
+    set.entity_ids.appendAssumeCapacity(Entity.Id.init(0, 1));
+    set.entity_ids.appendAssumeCapacity(Entity.Id.init(1, 1));
 
     const values: [*]u32 = @ptrCast(@alignCast(set.ptr));
     values[0] = 7;
 
-    try expectEqual(7, set.get(u32, EntityId.init(0, 1)).?.*);
+    try expectEqual(7, set.get(u32, Entity.Id.init(0, 1)).?.*);
 
-    const bytes = set.getBytes(EntityId.init(0, 1)).?;
+    const bytes = set.getBytes(Entity.Id.init(0, 1)).?;
     try expectEqual(@sizeOf(u32), bytes.len);
     try expectEqual(7, @as(*u32, @ptrCast(@alignCast(bytes.ptr))).*);
 
     // An unwritten dense entry, a stale generation, and an out-of-range index are absent.
-    try expect(set.get(u32, EntityId.init(1, 1)) == null);
-    try expect(set.get(u32, EntityId.init(0, 2)) == null);
-    try expect(set.get(u32, EntityId.init(2, 1)) == null);
-    try expect(set.getBytes(EntityId.init(1, 1)) == null);
+    try expect(set.get(u32, Entity.Id.init(1, 1)) == null);
+    try expect(set.get(u32, Entity.Id.init(0, 2)) == null);
+    try expect(set.get(u32, Entity.Id.init(2, 1)) == null);
+    try expect(set.getBytes(Entity.Id.init(1, 1)) == null);
 }
 
 test "remove validates generations, repairs mappings, and retains capacity" {
@@ -336,7 +338,7 @@ test "remove validates generations, repairs mappings, and retains capacity" {
     defer set.deinit();
     try set.sparse_to_dense.resize(allocator, 7);
     @memset(set.sparse_to_dense.items, .invalid);
-    const ids = [_]EntityId{ EntityId.init(2, 3), EntityId.init(5, 7), EntityId.init(1, 9) };
+    const ids = [_]Entity.Id{ Entity.Id.init(2, 3), Entity.Id.init(5, 7), Entity.Id.init(1, 9) };
     const values: [*]u32 = @ptrCast(@alignCast(set.ptr));
     for (ids, 0..) |id, row| {
         set.entity_ids.appendAssumeCapacity(id);
@@ -348,9 +350,9 @@ test "remove validates generations, repairs mappings, and retains capacity" {
     const old_sparse_capacity = set.sparse_to_dense.capacity;
     const old_ids_ptr = set.entity_ids.items.ptr;
 
-    try expect(!set.remove(EntityId.init(5, 6)));
-    try expect(!set.remove(EntityId.init(6, 1)));
-    try expect(!set.remove(EntityId.init(7, 1)));
+    try expect(!set.remove(Entity.Id.init(5, 6)));
+    try expect(!set.remove(Entity.Id.init(6, 1)));
+    try expect(!set.remove(Entity.Id.init(7, 1)));
     try expect(!set.remove(.invalid));
     try expect(!set.remove(.{ .index = .from(5) }));
     try expectEqual(3, set.len());
@@ -396,20 +398,20 @@ test "remove destroys managed values exactly once including teardown" {
         defer set.deinit();
         try set.sparse_to_dense.resize(allocator, 3);
         for (0..3) |row| {
-            set.entity_ids.appendAssumeCapacity(EntityId.init(@intCast(row), 1));
+            set.entity_ids.appendAssumeCapacity(Entity.Id.init(@intCast(row), 1));
             set.sparse_to_dense.items[row] = .from(@intCast(row));
             const value: *Managed = @ptrCast(@alignCast(set.ptr + row * @sizeOf(Managed)));
             value.* = .{ .calls = &calls[row] };
         }
 
-        try expect(!set.remove(EntityId.init(1, 2)));
+        try expect(!set.remove(Entity.Id.init(1, 2)));
         try expectEqual([_]usize{ 0, 0, 0 }, calls);
-        try expect(set.remove(EntityId.init(1, 1)));
+        try expect(set.remove(Entity.Id.init(1, 1)));
         try expectEqual([_]usize{ 0, 1, 0 }, calls);
-        try expectEqual(&calls[2], set.get(Managed, EntityId.init(2, 1)).?.calls);
-        try expect(!set.remove(EntityId.init(1, 1)));
+        try expectEqual(&calls[2], set.get(Managed, Entity.Id.init(2, 1)).?.calls);
+        try expect(!set.remove(Entity.Id.init(1, 1)));
         try expectEqual([_]usize{ 0, 1, 0 }, calls);
-        try expect(set.remove(EntityId.init(2, 1)));
+        try expect(set.remove(Entity.Id.init(2, 1)));
         try expectEqual([_]usize{ 0, 1, 1 }, calls);
     }
     try expectEqual([_]usize{ 1, 1, 1 }, calls);
@@ -431,18 +433,23 @@ test "remove destroys zero-sized managed values once including teardown" {
         defer set.deinit();
         try set.sparse_to_dense.resize(allocator, 3);
         for (0..3) |row| {
-            set.entity_ids.appendAssumeCapacity(EntityId.init(@intCast(row), 1));
+            set.entity_ids.appendAssumeCapacity(Entity.Id.init(@intCast(row), 1));
             set.sparse_to_dense.items[row] = .from(@intCast(row));
         }
         const old_ptr = set.ptr;
-        try expect(set.remove(EntityId.init(1, 1)));
+        try expect(set.remove(Entity.Id.init(1, 1)));
         try expectEqual(1, ManagedTag.calls);
         try expectEqual(DenseId.from(1), set.sparse_to_dense.items[2]);
-        try expect(set.get(ManagedTag, EntityId.init(2, 1)) != null);
-        try expect(set.remove(EntityId.init(2, 1)));
+        try expect(set.get(ManagedTag, Entity.Id.init(2, 1)) != null);
+        try expect(set.remove(Entity.Id.init(2, 1)));
         try expectEqual(2, ManagedTag.calls);
         try expectEqual(old_ptr, set.ptr);
         try expectEqual(3, set.capacity());
     }
     try expectEqual(3, ManagedTag.calls);
+}
+
+test {
+    _ = Iter;
+    _ = Registry;
 }

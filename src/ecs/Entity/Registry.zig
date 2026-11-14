@@ -5,14 +5,9 @@ const engine = @import("engine");
 const ecs = engine.ecs;
 const ComponentRegistry = ecs.component.Registry;
 const CompId = ecs.component.Id;
-const ArchetypeRegistry = ecs.entity.archetype.Registry;
-const ArchetypeId = ecs.entity.archetype.Id;
-const Archetype = ecs.entity.archetype.Archetype;
-const SparseSetRegistry = ecs.entity.sparse_set.Registry;
-const SparseSetId = ecs.entity.sparse_set.Id;
-const Entity = ecs.entity.Entity;
-const EntityId = ecs.entity.Id;
-const Signature = ecs.entity.Signature;
+const Archetype = ecs.Archetype;
+const SparseSet = ecs.SparseSet;
+const Entity = ecs.Entity;
 
 const reflect = engine.reflect;
 const TypeId = reflect.TypeId;
@@ -22,10 +17,10 @@ const Default = reflect.Default;
 const TypeMeta = reflect.TypeMeta;
 
 comp_reg: ComponentRegistry,
-arche_reg: ArchetypeRegistry,
-sparse_reg: SparseSetRegistry,
+arche_reg: Archetype.Registry,
+sparse_reg: SparseSet.Registry,
 entities: std.ArrayList(Entity),
-retired: std.ArrayList(EntityId),
+retired: std.ArrayList(Entity.Id),
 allocator: Allocator,
 
 /// Creates an entity registry with empty component, archetype and sparse set
@@ -33,8 +28,8 @@ allocator: Allocator,
 pub fn init(allocator: Allocator) @This() {
     return .{
         .comp_reg = ComponentRegistry.init(allocator),
-        .arche_reg = ArchetypeRegistry.init(allocator),
-        .sparse_reg = SparseSetRegistry.init(allocator),
+        .arche_reg = Archetype.Registry.init(allocator),
+        .sparse_reg = SparseSet.Registry.init(allocator),
         .entities = .empty,
         .retired = .empty,
         .allocator = allocator,
@@ -53,7 +48,7 @@ pub fn deinit(self: *@This()) void {
 }
 
 /// Returns whether `id` identifies a live entity, including its generation.
-pub fn contains(self: *const @This(), id: EntityId) bool {
+pub fn contains(self: *const @This(), id: Entity.Id) bool {
     return self.entityIndex(id) != null;
 }
 
@@ -69,7 +64,7 @@ pub fn isEmpty(self: *const @This()) bool {
 
 /// Borrows entity metadata, or returns null if `id` is unknown, stale, or retired.
 /// The pointer may be invalidated when another entity is created.
-pub fn get(self: *const @This(), id: EntityId) ?*const Entity {
+pub fn get(self: *const @This(), id: Entity.Id) ?*const Entity {
     const index = self.entityIndex(id) orelse return null;
     return &self.entities.items[index];
 }
@@ -77,7 +72,7 @@ pub fn get(self: *const @This(), id: EntityId) ?*const Entity {
 /// Mutably borrows entity metadata, or returns null if `id` is unknown, stale, or retired.
 /// The pointer may be invalidated when another entity is created.
 /// Callers must preserve the entity's storage and signature invariants.
-pub fn getMut(self: *@This(), id: EntityId) ?*Entity {
+pub fn getMut(self: *@This(), id: Entity.Id) ?*Entity {
     const index = self.entityIndex(id) orelse return null;
     return &self.entities.items[index];
 }
@@ -86,7 +81,7 @@ pub fn getMut(self: *@This(), id: EntityId) ?*Entity {
 /// Returns false for unknown, stale, or retired ids. On allocation failure,
 /// the entity and its components are unchanged. Retains component storage.
 /// Invalidates borrows of removed or moved values and active storage iterators.
-pub fn remove(self: *@This(), id: EntityId) Allocator.Error!bool {
+pub fn remove(self: *@This(), id: Entity.Id) Allocator.Error!bool {
     const index = self.entityIndex(id) orelse return false;
     try self.retired.ensureUnusedCapacity(self.allocator, 1);
 
@@ -107,7 +102,7 @@ pub fn remove(self: *@This(), id: EntityId) Allocator.Error!bool {
     return true;
 }
 
-fn entityIndex(self: *const @This(), id: EntityId) ?usize {
+fn entityIndex(self: *const @This(), id: Entity.Id) ?usize {
     const index = id.index.tryGet() orelse return null;
     if (index >= self.entities.items.len) return null;
     if (!self.entities.items[index].id.eql(id)) return null;
@@ -130,7 +125,7 @@ pub const ModifyError = AddBundleError || error{
 /// Consumes `insert` only on success; errors preserve entity values and input ownership.
 pub fn modify(
     self: *@This(),
-    id: EntityId,
+    id: Entity.Id,
     insert: Bundle,
     remove_ids: []const CompId,
 ) ModifyError!void {
@@ -163,7 +158,7 @@ pub fn modify(
 /// An archetype column index or sparse set id.
 const ModifyLocation = union(enum) {
     arche_col: usize,
-    sparse_set: SparseSetId,
+    sparse_set: SparseSet.Id,
 };
 
 /// A component's metadata, source and target locations, and insertion value index.
@@ -177,9 +172,9 @@ const ModifyStep = struct {
 
 /// The target signature, storage ids, missing defaults, and component steps.
 const ModifyPlan = struct {
-    signature: Signature,
-    archetype_id: ArchetypeId = .invalid,
-    sparse_comps: std.ArrayList(SparseSetId) = .empty,
+    signature: Entity.Signature,
+    archetype_id: Archetype.Id = .invalid,
+    sparse_comps: std.ArrayList(SparseSet.Id) = .empty,
     defaults: std.ArrayList(CompId) = .empty,
     steps: std.array_hash_map.Auto(CompId, ModifyStep) = .{},
 
@@ -213,7 +208,7 @@ fn planModify(
         if (containsComp(insert_ids[0..i], id)) return error.DuplicateComponent;
     }
 
-    var plan: ModifyPlan = .{ .signature = Signature.init(allocator) };
+    var plan: ModifyPlan = .{ .signature = Entity.Signature.init(allocator) };
     errdefer plan.deinit(allocator);
     const source_arch = self.arche_reg.getById(source.archetype_id).?;
     for (source_arch.meta.columns.items, 0..) |column, i| {
@@ -303,7 +298,7 @@ const PreparedModify = struct {
 /// change ownership here; successfully reserved capacity need not be rolled back.
 fn prepareModify(
     self: *@This(),
-    id: EntityId,
+    id: Entity.Id,
     insert: Bundle,
     plan: ModifyPlan,
 ) ModifyError!PreparedModify {
@@ -347,7 +342,7 @@ fn modifyBytes(
     location: ModifyLocation,
     arch: *Archetype,
     row: usize,
-    id: EntityId,
+    id: Entity.Id,
 ) []u8 {
     return switch (location) {
         .arche_col => |column| arch.at(column, row).data,
@@ -357,7 +352,7 @@ fn modifyBytes(
 
 /// The sole ownership-transfer phase. Must remain allocation-free and infallible.
 /// Fetches the current source row on each call, since earlier batch members may fill holes.
-fn commitModify(self: *@This(), id: EntityId, plan: ModifyPlan, prepared: *PreparedModify) void {
+fn commitModify(self: *@This(), id: Entity.Id, plan: ModifyPlan, prepared: *PreparedModify) void {
     const entity = self.getMut(id).?;
     const source = self.arche_reg.getById(entity.archetype_id).?;
     const target = self.arche_reg.getById(plan.archetype_id).?;
@@ -409,7 +404,7 @@ fn commitModify(self: *@This(), id: EntityId, plan: ModifyPlan, prepared: *Prepa
 
 /// Returns whether the live entity has the registered component.
 /// Unknown, stale, or reserved-only component ids return false.
-pub fn hasComponent(self: *const @This(), id: EntityId, comp_id: CompId) bool {
+pub fn hasComponent(self: *const @This(), id: Entity.Id, comp_id: CompId) bool {
     const entity = self.get(id) orelse return false;
     _ = self.comp_reg.getById(comp_id) orelse return false;
     return entity.signature.has(comp_id);
@@ -418,18 +413,18 @@ pub fn hasComponent(self: *const @This(), id: EntityId, comp_id: CompId) bool {
 /// Borrows a component's bytes, or returns null if the entity or component is absent.
 /// Unknown, stale, or reserved-only ids return null. Does not create storage.
 /// The slice may be invalidated by storage growth or structural changes.
-pub fn getComponent(self: *const @This(), id: EntityId, comp_id: CompId) ?[]const u8 {
+pub fn getComponent(self: *const @This(), id: Entity.Id, comp_id: CompId) ?[]const u8 {
     return self.componentBytes(id, comp_id);
 }
 
 /// Mutably borrows a component's bytes, or returns null if the entity or component is absent.
 /// Unknown, stale, or reserved-only ids return null. Does not create storage.
 /// The slice may be invalidated by storage growth or structural changes.
-pub fn getComponentMut(self: *@This(), id: EntityId, comp_id: CompId) ?[]u8 {
+pub fn getComponentMut(self: *@This(), id: Entity.Id, comp_id: CompId) ?[]u8 {
     return self.componentBytes(id, comp_id);
 }
 
-fn componentBytes(self: *const @This(), id: EntityId, comp_id: CompId) ?[]u8 {
+fn componentBytes(self: *const @This(), id: Entity.Id, comp_id: CompId) ?[]u8 {
     const entity = self.get(id) orelse return null;
     const meta = self.comp_reg.getById(comp_id) orelse return null;
     if (!entity.signature.has(comp_id)) return null;
@@ -463,7 +458,7 @@ pub const AddBundleError = AddParcelsError || Default.Error || error{
 
 /// Creates an entity from registered components, default-constructing missing requirements.
 /// Explicit values take precedence. Consumes `bundle` only on success.
-pub fn addBundle(self: *@This(), bundle: Bundle) AddBundleError!EntityId {
+pub fn addBundle(self: *@This(), bundle: Bundle) AddBundleError!Entity.Id {
     const allocator = self.allocator;
     var required: std.array_hash_map.Auto(CompId, void) = .{};
     defer required.deinit(allocator);
@@ -510,11 +505,11 @@ pub fn addBundle(self: *@This(), bundle: Bundle) AddBundleError!EntityId {
 }
 
 const AddParcelsError =
-    Allocator.Error || ecs.entity.archetype.ChunkLayout.Error || SplitByStorageError;
+    Allocator.Error || Archetype.ChunkLayout.Error || SplitByStorageError;
 
 /// Moves unique, fully resolved component values into storage only on success.
 /// Borrows descriptors and buffers; the caller handles their cleanup.
-fn addParcels(self: *@This(), parcels: []const Parcel) AddParcelsError!EntityId {
+fn addParcels(self: *@This(), parcels: []const Parcel) AddParcelsError!Entity.Id {
     const allocator = self.allocator;
 
     const storage_split_ids = try allocator.alloc(CompId, parcels.len);
@@ -584,14 +579,14 @@ fn createEntity(
     self: *@This(),
     ids: []const CompId,
     sparse_components: []const CompId,
-    archetype_id: ArchetypeId,
+    archetype_id: Archetype.Id,
     archetype_row: usize,
 ) Allocator.Error!Entity {
     const allocator = self.allocator;
     const id = if (self.retired.items.len != 0)
         self.retired.getLast()
     else
-        EntityId.init(self.entities.items.len, 0);
+        Entity.Id.init(self.entities.items.len, 0);
     try self.entities.ensureTotalCapacity(allocator, id.index.get() + 1);
 
     var entity = Entity.init(allocator, id);
@@ -613,8 +608,8 @@ fn createEntity(
 fn reserveStorage(
     self: *@This(),
     archetype: *Archetype,
-    id: EntityId,
-    sparse_ids: []const SparseSetId,
+    id: Entity.Id,
+    sparse_ids: []const SparseSet.Id,
 ) Allocator.Error!void {
     try archetype.reserve(1);
 
@@ -637,7 +632,7 @@ fn commitEntity(self: *@This(), entity: Entity, archetype: *Archetype) void {
         // A retired id replaces an existing slot instead of appending a new one.
         std.debug.assert(index < self.entities.items.len);
         std.debug.assert(self.retired.getLast().eql(entity.id));
-        std.debug.assert(self.entities.items[index].id.eql(EntityId.invalid));
+        std.debug.assert(self.entities.items[index].id.eql(Entity.Id.invalid));
 
         self.entities.items[index] = entity;
         _ = self.retired.pop();
@@ -677,8 +672,8 @@ fn storeArchetypeComponents(
 fn storeSparseComponents(
     self: *@This(),
     parcels: []const Parcel,
-    sparse_ids: []const SparseSetId,
-    id: EntityId,
+    sparse_ids: []const SparseSet.Id,
+    id: Entity.Id,
 ) void {
     var index: usize = 0;
     var parcel_index = parcels.len;
@@ -774,7 +769,7 @@ test "component access rejects absent and invalid ids without creating storage" 
         try expect(readonly.getComponent(id, stale) == null);
         try expect(registry.getComponentMut(id, stale) == null);
     }
-    const stale = EntityId.init(id.index.get(), id.generation.next().get());
+    const stale = Entity.Id.init(id.index.get(), id.generation.next().get());
     try expect(!readonly.hasComponent(stale, position_id));
     try expect(readonly.getComponent(stale, position_id) == null);
     try expect(registry.getComponentMut(stale, position_id) == null);
@@ -839,11 +834,11 @@ test "empty entity access reports metadata and rejects invalid ids" {
     const archetype = registry.arche_reg.getById(entity.archetype_id).?;
     try expectEqual(0, archetype.meta.columns.items.len);
     try expectEqual(1, archetype.len());
-    for ([_]EntityId{
+    for ([_]Entity.Id{
         .invalid,
         .{ .index = id.index },
-        EntityId.init(1, 0),
-        EntityId.init(id.index.get(), 1),
+        Entity.Id.init(1, 0),
+        Entity.Id.init(id.index.get(), 1),
     }) |invalid| {
         try expect(!readonly.contains(invalid));
         try expect(readonly.get(invalid) == null);
@@ -870,7 +865,7 @@ test "remove repairs storage, destroys values once, and retires ids for reuse" {
         var registry = init(allocator);
         defer registry.deinit();
         inline for (.{ Position, Probe, SparseProbe }) |T| _ = try registry.comp_reg.register(T);
-        var ids: [2]EntityId = undefined;
+        var ids: [2]Entity.Id = undefined;
         for (&ids, 0..) |*id, i| {
             id.* = try registry.addBundle(try .init(allocator, .{
                 Position{ .x = @intCast(i), .y = 4 },
@@ -886,11 +881,11 @@ test "remove repairs storage, destroys values once, and retires ids for reuse" {
         try expectEqual(1, archetype_calls);
         try expectEqual(1, sparse_calls);
         try expectEqual(2, registry.len());
-        for ([_]EntityId{
+        for ([_]Entity.Id{
             ids[0],
             ids[0].nextGeneration(),
             .invalid,
-            EntityId.init(100, 0),
+            Entity.Id.init(100, 0),
         }) |invalid|
             try expect(!try registry.remove(invalid));
 
@@ -1035,7 +1030,7 @@ fn testModifyAllocationFailures(allocator: Allocator, migrate: bool) !void {
         defer registry.deinit();
         inline for (.{ Position, Velocity, Health, Probe, SparseProbe, Root }) |T|
             _ = try registry.comp_reg.register(T);
-        var ids: [2]EntityId = undefined;
+        var ids: [2]Entity.Id = undefined;
         for (&ids) |*id| {
             var initial = try Bundle.init(std.testing.allocator, .{
                 Position{ .x = 3, .y = 4 },        Velocity{ .dx = 5, .dy = 6 },

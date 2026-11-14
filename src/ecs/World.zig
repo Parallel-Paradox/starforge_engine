@@ -5,24 +5,21 @@ const engine = @import("engine");
 const ecs = engine.ecs;
 const component = ecs.component;
 const ComponentRegistry = component.Registry;
-const entity = ecs.entity;
-const EntityId = entity.Id;
-const EntityRegistry = entity.Registry;
-const Change = entity.Change;
-const ArchetypeRegistry = entity.archetype.Registry;
-const SparseSetRegistry = entity.sparse_set.Registry;
+const Entity = ecs.Entity;
+const Archetype = ecs.Archetype;
+const SparseSet = ecs.SparseSet;
 const ResId = ecs.resource.Id;
 const ResourceRegistry = ecs.resource.Registry;
 const Bundle = engine.reflect.Bundle;
 
-entity_reg: EntityRegistry,
+entity_reg: Entity.Registry,
 res_reg: ResourceRegistry,
 allocator: Allocator,
 io: std.Io,
 
 pub fn init(allocator: Allocator, io: std.Io) @This() {
     return .{
-        .entity_reg = EntityRegistry.init(allocator),
+        .entity_reg = Entity.Registry.init(allocator),
         .res_reg = ResourceRegistry.init(allocator),
         .allocator = allocator,
         .io = io,
@@ -40,17 +37,17 @@ pub fn compReg(self: *@This()) *ComponentRegistry {
 }
 
 /// Returns the entity registry backing this world.
-pub fn entityReg(self: *@This()) *EntityRegistry {
+pub fn entityReg(self: *@This()) *Entity.Registry {
     return &self.entity_reg;
 }
 
 /// Returns the archetype registry backing this world.
-pub fn archeReg(self: *@This()) *ArchetypeRegistry {
+pub fn archeReg(self: *@This()) *Archetype.Registry {
     return &self.entity_reg.arche_reg;
 }
 
 /// Returns the sparse set registry backing this world.
-pub fn sparseReg(self: *@This()) *SparseSetRegistry {
+pub fn sparseReg(self: *@This()) *SparseSet.Registry {
     return &self.entity_reg.sparse_reg;
 }
 
@@ -93,7 +90,7 @@ pub fn removeResource(self: *@This(), comptime T: type) bool {
 pub fn addEntity(
     self: *@This(),
     fields: anytype,
-) (EntityRegistry.AddBundleError || ComponentRegistry.RegisterError)!EntityId {
+) (Entity.Registry.AddBundleError || ComponentRegistry.RegisterError)!Entity.Id {
     const types = Bundle.flatTypes(@TypeOf(fields));
     comptime {
         for (types) |T| component.assertComponent(T, "addEntity");
@@ -106,9 +103,9 @@ pub fn addEntity(
     return self.entity_reg.addBundle(bundle);
 }
 
-pub const ModifyEntityError = EntityRegistry.ModifyError || ComponentRegistry.RegisterError;
+pub const ModifyEntityError = Entity.Registry.ModifyError || ComponentRegistry.RegisterError;
 
-/// Applies a typed entity.Change, consuming insertions only on success.
+/// Applies a typed Entity.Change, consuming insertions only on success.
 /// Replaces existing values and ignores absent removals without registering them.
 /// May invalidate borrows and iterators.
 pub fn modifyEntity(
@@ -138,25 +135,25 @@ pub fn modifyEntity(
 /// Unknown, stale, or already removed ids return false. Allocation failure
 /// leaves the entity unchanged. Invalidates affected component borrows and
 /// active query iterators; do not call during query iteration.
-pub fn removeEntity(self: *@This(), id: EntityId) Allocator.Error!bool {
+pub fn removeEntity(self: *@This(), id: Entity.Id) Allocator.Error!bool {
     return self.entity_reg.remove(id);
 }
 
 /// Returns whether `id` identifies a live entity.
-pub fn containsEntity(self: *const @This(), id: EntityId) bool {
+pub fn containsEntity(self: *const @This(), id: Entity.Id) bool {
     return self.entity_reg.contains(id);
 }
 
 /// Borrows entity metadata, or returns null if the id is unknown, stale, or retired.
 /// Creating another entity may invalidate the pointer.
-pub fn getEntity(self: *const @This(), id: EntityId) ?*const entity.Entity {
+pub fn getEntity(self: *const @This(), id: Entity.Id) ?*const Entity {
     return self.entity_reg.get(id);
 }
 
 /// Mutably borrows entity metadata, or returns null if the id is unknown, stale, or retired.
 /// Creating another entity may invalidate the pointer.
 /// Callers must preserve the entity's storage and signature invariants.
-pub fn getEntityMut(self: *@This(), id: EntityId) ?*entity.Entity {
+pub fn getEntityMut(self: *@This(), id: Entity.Id) ?*Entity {
     return self.entity_reg.getMut(id);
 }
 
@@ -166,7 +163,7 @@ pub fn entityCount(self: *const @This()) usize {
 }
 
 /// Checks for a component without registering its type.
-pub fn hasComponent(self: *const @This(), id: EntityId, comptime T: type) bool {
+pub fn hasComponent(self: *const @This(), id: Entity.Id, comptime T: type) bool {
     component.assertComponent(T, "hasComponent");
     const comp_id = self.entity_reg.comp_reg.idOf(T) orelse return false;
     return self.entity_reg.hasComponent(id, comp_id);
@@ -174,7 +171,7 @@ pub fn hasComponent(self: *const @This(), id: EntityId, comptime T: type) bool {
 
 /// Borrows a component without registering its type; returns null if absent.
 /// Storage growth or structural changes may invalidate the pointer.
-pub fn getComponent(self: *const @This(), id: EntityId, comptime T: type) ?*const T {
+pub fn getComponent(self: *const @This(), id: Entity.Id, comptime T: type) ?*const T {
     component.assertComponent(T, "getComponent");
     const comp_id = self.entity_reg.comp_reg.idOf(T) orelse return null;
     const bytes = self.entity_reg.getComponent(id, comp_id) orelse return null;
@@ -183,7 +180,7 @@ pub fn getComponent(self: *const @This(), id: EntityId, comptime T: type) ?*cons
 
 /// Mutably borrows a component without registering its type; returns null if absent.
 /// Storage growth or structural changes may invalidate the pointer.
-pub fn getComponentMut(self: *@This(), id: EntityId, comptime T: type) ?*T {
+pub fn getComponentMut(self: *@This(), id: Entity.Id, comptime T: type) ?*T {
     component.assertComponent(T, "getComponentMut");
     const comp_id = self.entity_reg.comp_reg.idOf(T) orelse return null;
     const bytes = self.entity_reg.getComponentMut(id, comp_id) orelse return null;
@@ -264,7 +261,7 @@ test "modifyEntity accepts typed changes with nested bundles and absent removals
     var world = init(std.testing.allocator, std.testing.io);
     defer world.deinit();
     const id = try world.addEntity(.{Health{ .value = 7 }});
-    const RequestA = Change(.{ .insert = &.{Transform}, .remove = &.{ Health, Missing } });
+    const RequestA = Entity.Change(.{ .insert = &.{Transform}, .remove = &.{ Health, Missing } });
     try world.modifyEntity(RequestA, .{
         .id = id,
         .insert = .{Transform{ .position = .{ .x = 1, .y = 2 } }},
@@ -273,19 +270,19 @@ test "modifyEntity accepts typed changes with nested bundles and absent removals
     try expect(!world.hasComponent(id, Health));
     try expect(world.compReg().idOf(Missing) == null);
 
-    const RequestB = Change(.{ .insert = &.{Health}, .remove = &.{Transform} });
+    const RequestB = Entity.Change(.{ .insert = &.{Health}, .remove = &.{Transform} });
     const change: RequestB = .{ .id = id, .insert = .{Health{ .value = 9 }} };
     try world.modifyEntity(RequestB, change);
     try expect(!world.hasComponent(id, Position));
     try expectEqual(9, world.getComponent(id, Health).?.value);
-    try world.modifyEntity(Change(.{}), .{ .id = id });
-    try world.modifyEntity(Change(.{ .remove = &.{Health} }), .{ .id = id });
-    try world.modifyEntity(Change(.{ .insert = &.{Position} }), .{
+    try world.modifyEntity(Entity.Change(.{}), .{ .id = id });
+    try world.modifyEntity(Entity.Change(.{ .remove = &.{Health} }), .{ .id = id });
+    try world.modifyEntity(Entity.Change(.{ .insert = &.{Position} }), .{
         .id = id,
         .insert = .{Position{ .x = 3, .y = 4 }},
     });
     try expectEqual(1, world.entityCount());
-    try expectError(error.UnknownEntity, world.modifyEntity(Change(.{}), .{ .id = .invalid }));
+    try expectError(error.UnknownEntity, world.modifyEntity(Entity.Change(.{}), .{ .id = .invalid }));
 }
 
 test "addEntity delegates requirement completion to the entity registry" {
@@ -342,7 +339,7 @@ test "component access and modification support zero sized and highly aligned ty
         world.getComponentMut(aligned, Aligned).?.value = 23;
         try expectEqual(23, readonly.getComponent(aligned, Aligned).?.value);
 
-        try world.modifyEntity(Change(.{ .insert = &.{Aligned}, .remove = &.{Tag} }), .{
+        try world.modifyEntity(Entity.Change(.{ .insert = &.{Aligned}, .remove = &.{Tag} }), .{
             .id = tag,
             .insert = .{Aligned{ .value = 31 }},
         });
@@ -365,7 +362,7 @@ test "addEntity releases the temporary bundle without disposing copied values" {
     try expect(calls == 0);
 
     const id = try world.addEntity(.{});
-    try expectError(error.BufferTooLarge, world.modifyEntity(Change(.{ .insert = &.{Huge} }), .{
+    try expectError(error.BufferTooLarge, world.modifyEntity(Entity.Change(.{ .insert = &.{Huge} }), .{
         .id = id,
         .insert = .{huge},
     }));

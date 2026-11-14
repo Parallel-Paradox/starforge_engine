@@ -23,8 +23,13 @@ pub const Uuid = packed struct {
         v7 = 0b0111,
     };
 
-    pub const V4 = @import("v4.zig").V4;
-    pub const V7 = @import("v7.zig").V7;
+    pub const V4 = @import("V4.zig").V4;
+    pub const V7 = @import("V7.zig").V7;
+
+    test {
+        _ = V4;
+        _ = V7;
+    }
 
     pub fn toU128(self: @This()) u128 {
         return @bitCast(self);
@@ -40,8 +45,3 @@ pub const Uuid = packed struct {
         return @bitCast(std.mem.bigToNative(u128, @bitCast(bytes)));
     }
 };
-
-test {
-    _ = Uuid.V4;
-    _ = Uuid.V7;
-}

@@ -20,21 +20,21 @@ pub fn Change(comptime list: struct {
     const flat_insert_types = Bundle.flatTypes(Insert);
     const flat_remove_types = Bundle.flatTypes(@Tuple(list.remove));
     for (flat_insert_types, 0..) |T, i| {
-        component.assertComponent(T, "entity.Change insert");
+        component.assertComponent(T, "Entity.Change insert");
         for (flat_insert_types[0..i]) |U| {
             if (T == U)
-                @compileError("entity.Change inserts component more than once: " ++ @typeName(T));
+                @compileError("Entity.Change inserts component more than once: " ++ @typeName(T));
         }
     }
     for (flat_remove_types, 0..) |T, i| {
-        component.assertComponent(T, "entity.Change remove");
+        component.assertComponent(T, "Entity.Change remove");
         for (flat_remove_types[0..i]) |U| {
             if (T == U)
-                @compileError("entity.Change removes component more than once: " ++ @typeName(T));
+                @compileError("Entity.Change removes component more than once: " ++ @typeName(T));
         }
         for (flat_insert_types) |U| {
             if (T == U)
-                @compileError("entity.Change both inserts and removes component: " ++ @typeName(T));
+                @compileError("Entity.Change both inserts and removes component: " ++ @typeName(T));
         }
     }
 

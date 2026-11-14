@@ -2,20 +2,18 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const engine = @import("engine");
-const sparse_set = engine.ecs.entity.sparse_set;
-const SparseSetId = sparse_set.Id;
-const SparseSet = sparse_set.SparseSet;
+const SparseSet = engine.ecs.SparseSet;
 const TypeId = engine.reflect.TypeId;
 const TypeMeta = engine.reflect.TypeMeta;
 
 pub const Entry = struct {
-    id: SparseSetId,
+    id: SparseSet.Id,
     set: SparseSet,
 };
 
-type_to_id: std.AutoHashMapUnmanaged(TypeId, SparseSetId),
+type_to_id: std.AutoHashMapUnmanaged(TypeId, SparseSet.Id),
 entries: std.ArrayList(Entry),
-retired: std.ArrayList(SparseSetId),
+retired: std.ArrayList(SparseSet.Id),
 allocator: Allocator,
 
 /// Creates an empty registry; free it with `deinit`.
@@ -38,7 +36,7 @@ pub fn deinit(self: *@This()) void {
 
 /// Returns the sparse set registered for `id`, or null if it is unknown.
 /// The pointer is invalidated when another sparse set is registered.
-pub fn getById(self: *@This(), id: SparseSetId) ?*SparseSet {
+pub fn getById(self: *@This(), id: SparseSet.Id) ?*SparseSet {
     const index = id.index.tryGet() orelse return null;
     if (index >= self.entries.items.len) return null;
 
@@ -75,7 +73,7 @@ pub fn getOrCreate(self: *@This(), meta: TypeMeta) Allocator.Error!*Entry {
     const id = if (reuse)
         self.retired.getLast()
     else
-        SparseSetId.init(self.entries.items.len, 0);
+        SparseSet.Id.init(self.entries.items.len, 0);
     if (reuse) _ = self.retired.pop();
 
     const entry: Entry = .{ .id = id, .set = set };
@@ -132,9 +130,9 @@ test "getById returns a registered set and rejects unknown ids" {
     const set = registry.getById(entry.id).?;
     try expect(set.meta.eql(TypeMeta.of(u32)));
 
-    try expect(registry.getById(SparseSetId.init(0, 1)) == null);
-    try expect(registry.getById(SparseSetId.init(1, 0)) == null);
-    try expect(registry.getById(SparseSetId.invalid) == null);
+    try expect(registry.getById(SparseSet.Id.init(0, 1)) == null);
+    try expect(registry.getById(SparseSet.Id.init(1, 0)) == null);
+    try expect(registry.getById(SparseSet.Id.invalid) == null);
 }
 
 test "getByTypeId finds an entry by its component type" {

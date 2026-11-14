@@ -8,7 +8,7 @@ const engine = @import("engine");
 const ecs = engine.ecs;
 const CompId = ecs.component.Id;
 const CompRegistry = ecs.component.Registry;
-const Signature = ecs.entity.Signature;
+const Entity = ecs.Entity;
 
 const reflect = engine.reflect;
 const TypeId = reflect.TypeId;
@@ -17,7 +17,7 @@ const TypeMeta = reflect.TypeMeta;
 /// A sorted list of component IDs in the archetype, used to determine the memory layout.
 /// Ordered by alignment descending > size descending > component_id ascending.
 columns: std.ArrayList(Entry),
-signature: Signature,
+signature: Entity.Signature,
 /// TypeId -> column index.
 id_to_col: std.AutoHashMapUnmanaged(TypeId, usize) = .empty,
 
@@ -53,7 +53,7 @@ pub fn init(
 ) Allocator.Error!@This() {
     var self: @This() = .{
         .columns = .empty,
-        .signature = Signature.init(allocator),
+        .signature = Entity.Signature.init(allocator),
     };
     errdefer self.deinit(allocator);
 

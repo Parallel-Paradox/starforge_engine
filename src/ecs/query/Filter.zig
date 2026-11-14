@@ -17,7 +17,7 @@ const engine = @import("engine");
 const ecs = engine.ecs;
 const CompReg = ecs.component.Registry;
 const CompId = ecs.component.Id;
-const Signature = ecs.entity.Signature;
+const Entity = ecs.Entity;
 
 const Word = usize;
 const ShiftInt = std.math.Log2Int(Word);
@@ -271,7 +271,7 @@ pub fn term(self: @This(), index: usize) Term {
 
 /// Judges whether every entity in an archetype with signature `sig` matches the
 /// filter. A filter without leaves accepts everything.
-pub fn judgeArchetype(self: @This(), sig: Signature) Decision {
+pub fn judgeArchetype(self: @This(), sig: Entity.Signature) Decision {
     const have = signatureWords(sig);
     var result: Decision = .reject;
     for (0..self.term_count) |i| {
@@ -287,7 +287,7 @@ pub fn judgeArchetype(self: @This(), sig: Signature) Decision {
 /// filter. `sig` must cover the archetype-stored components too, not only sparse
 /// ones, because different terms may constrain the same archetype differently.
 /// Call only when `judgeArchetype` returned `.per_entity`.
-pub fn judgeEntity(self: @This(), sig: Signature) bool {
+pub fn judgeEntity(self: @This(), sig: Entity.Signature) bool {
     const have = signatureWords(sig);
     for (0..self.term_count) |i| {
         const t = self.term(i);
@@ -591,7 +591,7 @@ fn orInto(dst: []Word, src: []const Word) void {
 }
 
 /// The words that hold the signature's bits.
-fn signatureWords(sig: Signature) []const Word {
+fn signatureWords(sig: Entity.Signature) []const Word {
     return sig.mask.masks[0 .. (sig.mask.capacity() + word_bits - 1) / word_bits];
 }
 
@@ -798,7 +798,7 @@ test "init merges terms that differ only in one component's polarity" {
     _ = try registry.register(Frozen);
     _ = try registry.register(Health);
 
-    var empty_sig = Signature.init(allocator);
+    var empty_sig = Entity.Signature.init(allocator);
     defer empty_sig.deinit(allocator);
 
     // A or not A is a tautology, for archetype and sparse components alike.
@@ -926,23 +926,23 @@ test "judgeArchetype combines terms into a decision" {
     const velocity = try registry.register(Velocity);
     const frozen = try registry.register(Frozen);
 
-    var only_position = Signature.init(allocator);
+    var only_position = Entity.Signature.init(allocator);
     defer only_position.deinit(allocator);
     try only_position.add(allocator, &.{position});
 
-    var only_velocity = Signature.init(allocator);
+    var only_velocity = Entity.Signature.init(allocator);
     defer only_velocity.deinit(allocator);
     try only_velocity.add(allocator, &.{velocity});
 
-    var position_velocity = Signature.init(allocator);
+    var position_velocity = Entity.Signature.init(allocator);
     defer position_velocity.deinit(allocator);
     try position_velocity.add(allocator, &.{ position, velocity });
 
-    var position_frozen = Signature.init(allocator);
+    var position_frozen = Entity.Signature.init(allocator);
     defer position_frozen.deinit(allocator);
     try position_frozen.add(allocator, &.{ position, frozen });
 
-    var unmentioned = Signature.init(allocator);
+    var unmentioned = Entity.Signature.init(allocator);
     defer unmentioned.deinit(allocator);
 
     inline for (.{ With(Position), Without(Position) }) |spec| {
@@ -1007,7 +1007,7 @@ test "judgeArchetype handles signatures wider than the filter" {
     var last: CompId = undefined;
     inline for (0..70) |i| last = try registry.register(Marker(i));
 
-    var wide = Signature.init(allocator);
+    var wide = Entity.Signature.init(allocator);
     defer wide.deinit(allocator);
     try wide.add(allocator, &.{ position, last });
     try expect(bitOf(last) >= word_bits);
@@ -1027,11 +1027,11 @@ test "judgeEntity checks sparse components on undecided archetypes" {
     _ = try registry.register(Velocity);
     const health = try registry.register(Health);
 
-    var position_health = Signature.init(allocator);
+    var position_health = Entity.Signature.init(allocator);
     defer position_health.deinit(allocator);
     try position_health.add(allocator, &.{ position, health });
 
-    var position_only = Signature.init(allocator);
+    var position_only = Entity.Signature.init(allocator);
     defer position_only.deinit(allocator);
     try position_only.add(allocator, &.{position});
 
@@ -1081,7 +1081,7 @@ test "judgeEntity checks sparse components on undecided archetypes" {
             All(.{ Without(Position), Without(Health) }),
         }));
         defer filter.deinit(allocator);
-        var neither = Signature.init(allocator);
+        var neither = Entity.Signature.init(allocator);
         defer neither.deinit(allocator);
         try expect(filter.judgeArchetype(position_only) == .per_entity);
         try expect(filter.judgeArchetype(neither) == .per_entity);
@@ -1097,9 +1097,9 @@ test "empty roots and branches preserve logical identities" {
     defer registry.deinit();
     const position = try registry.register(Position);
 
-    var absent = Signature.init(allocator);
+    var absent = Entity.Signature.init(allocator);
     defer absent.deinit(allocator);
-    var present = Signature.init(allocator);
+    var present = Entity.Signature.init(allocator);
     defer present.deinit(allocator);
     try present.add(allocator, &.{position});
 

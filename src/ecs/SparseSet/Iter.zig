@@ -3,9 +3,8 @@
 const std = @import("std");
 
 const engine = @import("engine");
-const entity = engine.ecs.entity;
-const EntityId = entity.Id;
-const SparseSet = entity.sparse_set.SparseSet;
+const Entity = engine.ecs.Entity;
+const SparseSet = engine.ecs.SparseSet;
 
 set: *const SparseSet,
 /// Row of the next entity to yield.
@@ -16,7 +15,7 @@ row: usize = 0,
 /// The row is snapshotted when the item is yielded, so it keeps addressing the
 /// same value after the iterator has advanced.
 pub const Item = struct {
-    id: EntityId,
+    id: Entity.Id,
     /// Row of this entity's value in the dense buffer.
     row: usize,
     /// The sparse set holding this value.
@@ -82,16 +81,16 @@ test "iter visits every entity and exposes its value" {
     defer set.deinit();
 
     for (0..3) |index| {
-        set.entity_ids.appendAssumeCapacity(EntityId.init(@intCast(index), 1));
+        set.entity_ids.appendAssumeCapacity(Entity.Id.init(@intCast(index), 1));
     }
 
     var it = set.iter();
     const first = it.next().?;
-    try expect(first.id.eql(EntityId.init(0, 1)));
+    try expect(first.id.eql(Entity.Id.init(0, 1)));
 
     var visited: usize = 1;
     while (it.next()) |item| : (visited += 1) {
-        try expect(item.id.eql(EntityId.init(@intCast(visited), 1)));
+        try expect(item.id.eql(Entity.Id.init(@intCast(visited), 1)));
         const ptr: *u32 = @ptrCast(@alignCast(item.value().ptr));
         ptr.* = @intCast(visited + 10);
     }
