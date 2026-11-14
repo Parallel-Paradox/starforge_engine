@@ -224,7 +224,7 @@ pub fn splitByStorage(comptime list: []const type) struct {
 
 /// Returns whether the live entity has the registered component.
 /// Unknown, stale, or reserved-only component ids return false.
-pub fn hasComponent(self: *const Self, id: Entity.Id, comp_id: CompId) bool {
+pub fn hasComp(self: *const Self, id: Entity.Id, comp_id: CompId) bool {
     const entity = self.get(id) orelse return false;
     _ = self.comp_reg.getById(comp_id) orelse return false;
     return entity.signature.has(comp_id);
@@ -233,38 +233,70 @@ pub fn hasComponent(self: *const Self, id: Entity.Id, comp_id: CompId) bool {
 /// Borrows a component's bytes, or returns null if the entity or component is absent.
 /// Unknown, stale, or reserved-only ids return null. Does not create storage.
 /// The slice may be invalidated by storage growth or structural changes.
-pub fn getComponent(self: *const Self, id: Entity.Id, comp_id: CompId) ?[]const u8 {
-    return componentBytes(self, id, comp_id);
+pub fn getComp(self: *const Self, id: Entity.Id, comp_id: CompId) ?[]const u8 {
+    return componentBytes(false, self, id, comp_id);
 }
 
 /// Mutably borrows a component's bytes, or returns null if the entity or component is absent.
 /// Unknown, stale, or reserved-only ids return null. Does not create storage.
 /// The slice may be invalidated by storage growth or structural changes.
-pub fn getComponentMut(self: *Self, id: Entity.Id, comp_id: CompId) ?[]u8 {
-    return componentBytes(self, id, comp_id);
+pub fn getCompMut(self: *Self, id: Entity.Id, comp_id: CompId) ?[]u8 {
+    return componentBytes(true, self, id, comp_id);
 }
 
-fn componentBytes(self: *const Self, id: Entity.Id, comp_id: CompId) ?[]u8 {
+/// Checks a component type without registering it.
+pub fn hasTypedComp(self: *const Self, id: Entity.Id, comptime T: type) bool {
+    ecs.component.assertComponent(T, "hasTypedComp");
+    const comp_id = self.comp_reg.idOf(T) orelse return false;
+    return self.hasComp(id, comp_id);
+}
+
+/// Borrows a typed component without registration; null if the entity or component is absent.
+/// Storage growth or structural changes may invalidate the pointer.
+pub fn getTypedComp(self: *const Self, id: Entity.Id, comptime T: type) ?*const T {
+    ecs.component.assertComponent(T, "getTypedComp");
+    const comp_id = self.comp_reg.idOf(T) orelse return null;
+    const bytes = self.getComp(id, comp_id) orelse return null;
+    return @ptrCast(@alignCast(bytes.ptr));
+}
+
+/// Mutably borrows a typed component with the same lookup and lifetime rules as getTypedComp.
+pub fn getTypedCompMut(self: *Self, id: Entity.Id, comptime T: type) ?*T {
+    ecs.component.assertComponent(T, "getTypedCompMut");
+    const comp_id = self.comp_reg.idOf(T) orelse return null;
+    const bytes = self.getCompMut(id, comp_id) orelse return null;
+    return @ptrCast(@alignCast(bytes.ptr));
+}
+
+fn componentBytes(
+    comptime mutable: bool,
+    self: if (mutable) *Self else *const Self,
+    id: Entity.Id,
+    comp_id: CompId,
+) if (mutable) ?[]u8 else ?[]const u8 {
     const entity = self.get(id) orelse return null;
     const meta = self.comp_reg.getById(comp_id) orelse return null;
     if (!entity.signature.has(comp_id)) return null;
 
     switch (meta.storage) {
         .archetype => {
-            const index = entity.archetype_id.index.tryGet() orelse return null;
-            if (index >= self.arche_reg.entries.items.len) return null;
-            const entry = &self.arche_reg.entries.items[index];
-            if (!entry.id.eql(entity.archetype_id)) return null;
-            const column = entry.archetype.meta.id_to_col.get(meta.typeId()) orelse return null;
-            return entry.archetype.at(column, entity.archetype_row).data;
+            if (mutable) {
+                const archetype = self.arche_reg.getByIdMut(entity.archetype_id) orelse return null;
+                return archetype.getBytesMut(meta.typeId(), entity.archetype_row);
+            } else {
+                const archetype =
+                    self.arche_reg.getById(entity.archetype_id) orelse return null;
+                return archetype.getBytes(meta.typeId(), entity.archetype_row);
+            }
         },
         .sparse_set => {
-            const set_id = self.sparse_reg.type_to_id.get(meta.typeId()) orelse return null;
-            const index = set_id.index.tryGet() orelse return null;
-            if (index >= self.sparse_reg.entries.items.len) return null;
-            const entry = &self.sparse_reg.entries.items[index];
-            if (!entry.id.eql(set_id)) return null;
-            return entry.set.getBytes(id);
+            if (mutable) {
+                const entry = self.sparse_reg.getByTypeIdMut(meta.typeId()) orelse return null;
+                return entry.set.getBytesMut(id);
+            } else {
+                const entry = self.sparse_reg.getByTypeId(meta.typeId()) orelse return null;
+                return entry.set.getBytes(id);
+            }
         },
     }
 }
@@ -420,20 +452,62 @@ test "normalize completes cyclic requirements once and honors explicit overrides
     _ = normalize(.{G.Root{ .value = 7 }});
     try expectEqual(2, G.Right.calls);
 }
+test "component byte access preserves constness and resolves storage through registry lookups" {
+    var registry = Self.init(std.testing.allocator);
+    defer registry.deinit();
+    const id = try registry.add(.{ Position{ .x = 1, .y = 2 }, Health{ .value = 3 } });
+    const readonly: *const Self = &registry;
+    inline for (.{ Position, Health }) |T| {
+        const comp_id = registry.comp_reg.idOf(T).?;
+        const bytes = registry.getCompMut(id, comp_id).?;
+        const view = readonly.getComp(id, comp_id).?;
+        const typed = readonly.getTypedComp(id, T).?;
+        const typed_mut = registry.getTypedCompMut(id, T).?;
+        try expect(@TypeOf(typed) == *const T);
+        try expect(@TypeOf(typed_mut) == *T);
+        try expect(readonly.hasTypedComp(id, T));
+        try expectEqual(@intFromPtr(bytes.ptr), @intFromPtr(typed_mut));
+        try expectEqual(@intFromPtr(view.ptr), @intFromPtr(typed));
+        try expect(@TypeOf(bytes) == []u8);
+        try expect(@TypeOf(view) == []const u8);
+        try expectEqual(@intFromPtr(bytes.ptr), @intFromPtr(view.ptr));
+        @memset(bytes, 0);
+        for (view) |byte| try expectEqual(0, byte);
+    }
+    const entity = readonly.get(id).?;
+    const archetype = readonly.arche_reg.getById(entity.archetype_id).?;
+    try expect(@TypeOf(archetype) == *const ecs.Archetype);
+    try expect(archetype.getBytes(TypeId.of(Health), entity.archetype_row) == null);
+    try expect(archetype.getBytes(TypeId.of(Position), archetype.len()) == null);
+    try expect(readonly.arche_reg.getById(entity.archetype_id.nextGeneration()) == null);
+    const entry = readonly.sparse_reg.getByTypeId(TypeId.of(Health)).?;
+    try expect(@TypeOf(entry) == *const ecs.SparseSet.Registry.Entry);
+    try expect(readonly.sparse_reg.getById(entry.id).? == &entry.set);
+    try expect(readonly.sparse_reg.getById(entry.id.nextGeneration()) == null);
+    try expect(readonly.sparse_reg.getByTypeId(TypeId.of(Position)) == null);
+}
+
 test "component access rejects absent and invalid ids without creating storage" {
     const allocator = std.testing.allocator;
     var registry = Self.init(allocator);
     defer registry.deinit();
     const readonly: *const Self = &registry;
+    try expect(!readonly.hasTypedComp(.invalid, Probe));
+    try expect(readonly.getTypedComp(.invalid, Probe) == null);
+    try expect(registry.getTypedCompMut(.invalid, Probe) == null);
+    try expect(registry.comp_reg.idOf(Probe) == null);
     const position_id = try registry.comp_reg.register(Position);
     const health_id = try registry.comp_reg.register(Health);
     const reserved = try registry.comp_reg.reserve(TypeId.of(Probe));
     const empty = try registry.add(.{});
+    try expect(!readonly.hasTypedComp(empty, Probe));
+    try expect(readonly.getTypedComp(empty, Probe) == null);
+    try expect(registry.getTypedCompMut(empty, Probe) == null);
 
     for ([_]CompId{ position_id, health_id, reserved, .invalid, CompId.init(100, 0) }) |comp_id| {
-        try expect(!readonly.hasComponent(empty, comp_id));
-        try expect(readonly.getComponent(empty, comp_id) == null);
-        try expect(registry.getComponentMut(empty, comp_id) == null);
+        try expect(!readonly.hasComp(empty, comp_id));
+        try expect(readonly.getComp(empty, comp_id) == null);
+        try expect(registry.getCompMut(empty, comp_id) == null);
     }
     try expectEqual(1, registry.arche_reg.entries.items.len);
     try expectEqual(0, registry.sparse_reg.entries.items.len);
@@ -444,12 +518,15 @@ test "component access rejects absent and invalid ids without creating storage" 
     });
     for ([_]CompId{ position_id, health_id }) |comp_id| {
         const stale = CompId.init(comp_id.index.get(), comp_id.generation.next().get());
-        try expect(!readonly.hasComponent(id, stale));
-        try expect(readonly.getComponent(id, stale) == null);
-        try expect(registry.getComponentMut(id, stale) == null);
+        try expect(!readonly.hasComp(id, stale));
+        try expect(readonly.getComp(id, stale) == null);
+        try expect(registry.getCompMut(id, stale) == null);
     }
     const stale = Entity.Id.init(id.index.get(), id.generation.next().get());
-    try expect(!readonly.hasComponent(stale, position_id));
-    try expect(readonly.getComponent(stale, position_id) == null);
-    try expect(registry.getComponentMut(stale, position_id) == null);
+    try expect(!readonly.hasTypedComp(stale, Position));
+    try expect(readonly.getTypedComp(stale, Position) == null);
+    try expect(registry.getTypedCompMut(stale, Position) == null);
+    try expect(!readonly.hasComp(stale, position_id));
+    try expect(readonly.getComp(stale, position_id) == null);
+    try expect(registry.getCompMut(stale, position_id) == null);
 }

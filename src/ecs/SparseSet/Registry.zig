@@ -36,32 +36,46 @@ pub fn deinit(self: *@This()) void {
 
 /// Returns the sparse set registered for `id`, or null if it is unknown.
 /// The pointer is invalidated when another sparse set is registered.
-pub fn getById(self: *@This(), id: SparseSet.Id) ?*SparseSet {
+pub fn getByIdMut(self: *@This(), id: SparseSet.Id) ?*SparseSet {
+    const index = self.entryIndex(id) orelse return null;
+    return &self.entries.items[index].set;
+}
+
+/// Read-only lookup with the same validity and lifetime rules as getByIdMut.
+pub fn getById(self: *const @This(), id: SparseSet.Id) ?*const SparseSet {
+    const index = self.entryIndex(id) orelse return null;
+    return &self.entries.items[index].set;
+}
+
+fn entryIndex(self: *const @This(), id: SparseSet.Id) ?usize {
     const index = id.index.tryGet() orelse return null;
     if (index >= self.entries.items.len) return null;
 
     const entry = &self.entries.items[index];
     if (!entry.id.eql(id)) return null;
-    return &entry.set;
+    return index;
 }
 
 /// Returns the entry for the sparse set of `type_id`, or null if it is unknown.
 /// The pointer is invalidated when another sparse set is registered.
-pub fn getByTypeId(self: *@This(), type_id: TypeId) ?*Entry {
+pub fn getByTypeIdMut(self: *@This(), type_id: TypeId) ?*Entry {
     const id = self.type_to_id.get(type_id) orelse return null;
-    const index = id.index.tryGet() orelse return null;
-    if (index >= self.entries.items.len) return null;
+    const index = self.entryIndex(id) orelse return null;
+    return &self.entries.items[index];
+}
 
-    const entry = &self.entries.items[index];
-    if (!entry.id.eql(id)) return null;
-    return entry;
+/// Read-only lookup with the same validity and lifetime rules as getByTypeIdMut.
+pub fn getByTypeId(self: *const @This(), type_id: TypeId) ?*const Entry {
+    const id = self.type_to_id.get(type_id) orelse return null;
+    const index = self.entryIndex(id) orelse return null;
+    return &self.entries.items[index];
 }
 
 /// Returns the entry for the sparse set of `meta`, creating and registering it when needed.
 /// The pointer is invalidated when another sparse set is registered.
 pub fn getOrCreate(self: *@This(), meta: TypeMeta) Allocator.Error!*Entry {
     const type_id = meta.id;
-    if (self.getByTypeId(type_id)) |entry| return entry;
+    if (self.getByTypeIdMut(type_id)) |entry| return entry;
 
     const allocator = self.allocator;
     try self.entries.ensureUnusedCapacity(allocator, 1);

@@ -75,25 +75,39 @@ pub fn deinit(self: *@This()) void {
 
 /// Returns the archetype registered for `id`, or null if it is unknown.
 /// The pointer is invalidated when another archetype is registered.
-pub fn getById(self: *@This(), id: Archetype.Id) ?*Archetype {
+pub fn getByIdMut(self: *@This(), id: Archetype.Id) ?*Archetype {
+    const index = self.entryIndex(id) orelse return null;
+    return &self.entries.items[index].archetype;
+}
+
+/// Read-only lookup with the same validity and lifetime rules as getByIdMut.
+pub fn getById(self: *const @This(), id: Archetype.Id) ?*const Archetype {
+    const index = self.entryIndex(id) orelse return null;
+    return &self.entries.items[index].archetype;
+}
+
+fn entryIndex(self: *const @This(), id: Archetype.Id) ?usize {
     const index = id.index.tryGet() orelse return null;
     if (index >= self.entries.items.len) return null;
 
     const entry = &self.entries.items[index];
     if (!entry.id.eql(id)) return null;
-    return &entry.archetype;
+    return index;
 }
 
 /// Returns the entry for the archetype storing exactly `signature`, or null if it is
 /// unknown. The pointer is invalidated when another archetype is registered.
-pub fn getBySig(self: *@This(), signature: Entity.Signature) ?*Entry {
+pub fn getBySig(self: *const @This(), signature: Entity.Signature) ?*const Entry {
     const id = self.signature_to_id.get(signature) orelse return null;
-    const index = id.index.tryGet() orelse return null;
-    if (index >= self.entries.items.len) return null;
+    const index = self.entryIndex(id) orelse return null;
+    return &self.entries.items[index];
+}
 
-    const entry = &self.entries.items[index];
-    if (!entry.id.eql(id)) return null;
-    return entry;
+/// Mutably borrows an entry with the same lookup and lifetime rules as getBySig.
+pub fn getBySigMut(self: *@This(), signature: Entity.Signature) ?*Entry {
+    const id = self.signature_to_id.get(signature) orelse return null;
+    const index = self.entryIndex(id) orelse return null;
+    return &self.entries.items[index];
 }
 
 /// Returns the entry for the archetype storing exactly `ids`, creating and registering it
@@ -108,7 +122,7 @@ pub fn getOrCreate(
     defer signature.deinit(self.allocator);
     try signature.add(self.allocator, ids);
 
-    if (self.getBySig(signature)) |entry| return entry;
+    if (self.getBySigMut(signature)) |entry| return entry;
 
     const allocator = self.allocator;
     try self.entries.ensureUnusedCapacity(allocator, 1);

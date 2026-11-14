@@ -120,6 +120,21 @@ pub fn at(self: @This(), column: usize, row: usize) struct { data: []u8, id: Ent
     };
 }
 
+/// Mutably borrows a component by type id; null for an absent type or non-live row.
+/// The bytes may be invalidated by storage growth or structural changes.
+pub fn getBytesMut(self: *@This(), type_id: TypeId, row: usize) ?[]u8 {
+    if (row >= self.len()) return null;
+    const column = self.meta.id_to_col.get(type_id) orelse return null;
+    return self.at(column, row).data;
+}
+
+/// Read-only byte access with the same lookup and lifetime rules as getBytesMut.
+pub fn getBytes(self: *const @This(), type_id: TypeId, row: usize) ?[]const u8 {
+    if (row >= self.len()) return null;
+    const column = self.meta.id_to_col.get(type_id) orelse return null;
+    return self.at(column, row).data;
+}
+
 /// Returns the typed component value for `row` in `column` and the row's entity id.
 ///
 /// Asserts that `T` is the component type stored in `column`.

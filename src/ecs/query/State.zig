@@ -67,7 +67,7 @@ pub fn iter(self: *const @This()) Iter {
     var index: usize = 0;
     while (index < self.caches.items.len) : (index += 1) {
         const cached = self.caches.items[index];
-        const archetype = self.world.archeReg().getById(cached.id) orelse continue;
+        const archetype = self.world.archeReg().getByIdMut(cached.id) orelse continue;
         return .{ .state = self, .current_index = index, .iter = archetype.iter() };
     }
 

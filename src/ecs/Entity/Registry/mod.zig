@@ -21,9 +21,12 @@ pub const addBatch = _add.addBatch;
 pub const addBatchImpl = _add.addBatchImpl;
 pub const ModifyError = _modify.ModifyError;
 pub const modify = _modify.modify;
-pub const hasComponent = _storage.hasComponent;
-pub const getComponent = _storage.getComponent;
-pub const getComponentMut = _storage.getComponentMut;
+pub const hasComp = _storage.hasComp;
+pub const getComp = _storage.getComp;
+pub const getCompMut = _storage.getCompMut;
+pub const hasTypedComp = _storage.hasTypedComp;
+pub const getTypedComp = _storage.getTypedComp;
+pub const getTypedCompMut = _storage.getTypedCompMut;
 pub const group = _storage.group;
 pub const validateColumns = _storage.validateColumns;
 
@@ -98,12 +101,12 @@ pub fn remove(self: *@This(), id: Entity.Id) Allocator.Error!bool {
 
     const entity = &self.entities.items[index];
     const row = entity.archetype_row;
-    const archetype = self.arche_reg.getById(entity.archetype_id).?;
+    const archetype = self.arche_reg.getByIdMut(entity.archetype_id).?;
     if (archetype.swapRemove(row)) |moved| {
         self.getMut(moved).?.archetype_row = row;
     }
     for (entity.sparse_comps.items) |set_id| {
-        const removed = self.sparse_reg.getById(set_id).?.remove(id);
+        const removed = self.sparse_reg.getByIdMut(set_id).?.remove(id);
         std.debug.assert(removed);
     }
 

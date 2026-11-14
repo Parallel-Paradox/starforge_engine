@@ -32,7 +32,7 @@ pub fn next(self: *@This()) ?Item {
             if (self.current_index >= self.state.caches.items.len) return null;
 
             const cached = self.state.caches.items[self.current_index];
-            const archetype = self.state.world.archeReg().getById(cached.id) orelse continue;
+            const archetype = self.state.world.archeReg().getByIdMut(cached.id) orelse continue;
             self.iter = archetype.iter();
             break;
         }
@@ -79,5 +79,5 @@ pub fn sparseSet(self: @This(), index: usize) ?*SparseSet {
     std.debug.assert(index < targets.len);
 
     const target = targets[index] orelse return null;
-    return self.state.world.sparseReg().getById(target.sparse_id);
+    return self.state.world.sparseReg().getByIdMut(target.sparse_id);
 }

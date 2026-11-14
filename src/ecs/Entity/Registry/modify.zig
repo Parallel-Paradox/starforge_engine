@@ -219,7 +219,7 @@ fn prepareModify(
         .explicit_count = 0,
     };
     errdefer prepared.deinit(allocator, false);
-    const target = self.arche_reg.getById(plan.archetype_id).?;
+    const target = self.arche_reg.getByIdMut(plan.archetype_id).?;
     try prepared.entity.sparse_comps.appendSlice(allocator, plan.sparse_comps.items);
     if (plan.sparse_comps.items.len == 0) {
         prepared.entity.signature = target.meta.signature;
@@ -246,7 +246,7 @@ fn prepareModify(
     for (plan.steps.values()) |step| {
         const location = step.target orelse continue;
         if (location != .sparse_set or step.source != null) continue;
-        try self.sparse_reg.getById(location.sparse_set).?.reserveForEntity(id);
+        try self.sparse_reg.getByIdMut(location.sparse_set).?.reserveForEntity(id);
     }
     return prepared;
 }
@@ -260,7 +260,7 @@ fn modifyBytes(
 ) []u8 {
     return switch (location) {
         .arche_col => |column| arch.at(column, row).data,
-        .sparse_set => |set_id| self.sparse_reg.getById(set_id).?.getBytes(id).?,
+        .sparse_set => |set_id| self.sparse_reg.getByIdMut(set_id).?.getBytesMut(id).?,
     };
 }
 
@@ -268,8 +268,8 @@ fn modifyBytes(
 /// Fetches the current source row on each call, since earlier batch members may fill holes.
 fn commitModify(self: *Self, id: Entity.Id, plan: ModifyPlan, prepared: *PreparedModify) void {
     const entity = self.getMut(id).?;
-    const source = self.arche_reg.getById(entity.archetype_id).?;
-    const target = self.arche_reg.getById(plan.archetype_id).?;
+    const source = self.arche_reg.getByIdMut(entity.archetype_id).?;
+    const target = self.arche_reg.getByIdMut(plan.archetype_id).?;
     const migrate = !entity.archetype_id.eql(plan.archetype_id);
     const row = entity.archetype_row;
     const target_row = if (migrate) target.appendUninitAssumeCapacity(id) else row;
@@ -281,7 +281,7 @@ fn commitModify(self: *Self, id: Entity.Id, plan: ModifyPlan, prepared: *Prepare
                     .managed => |deinit_fn| deinit_fn(source.at(column, row).data.ptr),
                 },
                 .sparse_set => |set_id| {
-                    const removed = self.sparse_reg.getById(set_id).?.remove(id);
+                    const removed = self.sparse_reg.getByIdMut(set_id).?.remove(id);
                     std.debug.assert(removed);
                 },
             }
@@ -297,7 +297,7 @@ fn commitModify(self: *Self, id: Entity.Id, plan: ModifyPlan, prepared: *Prepare
         }
         const location = step.target.?;
         if (location == .sparse_set and step.source == null) {
-            const set = self.sparse_reg.getById(location.sparse_set).?;
+            const set = self.sparse_reg.getByIdMut(location.sparse_set).?;
             const dense = set.len();
             set.entity_ids.appendAssumeCapacity(id);
             set.sparse_to_dense.items[id.index.get()] = .from(@intCast(dense));
@@ -400,8 +400,8 @@ fn testModifyAllocationFailures(allocator: Allocator, migrate: bool) !void {
         try testing.expectArchetypeValue(arch, Position, changed.archetype_row, .{ .x = 3, .y = 4 });
         const sparse = &registry.sparse_reg.getByTypeId(TypeId.of(SparseProbe)).?.set;
         try expectEqual(&calls[3], sparse.get(SparseProbe, ids[0]).?.calls);
-        try expectEqual(!migrate, registry.hasComponent(ids[0], registry.comp_reg.idOf(Health).?));
-        try expectEqual(migrate, registry.hasComponent(ids[0], registry.comp_reg.idOf(Root).?));
+        try expectEqual(!migrate, registry.hasTypedComp(ids[0], Health));
+        try expectEqual(migrate, registry.hasTypedComp(ids[0], Root));
         const survivor = registry.get(ids[1]).?;
         try expectEqual(@intFromBool(!migrate), survivor.archetype_row);
         try testing.expectArchetypeValue(
@@ -512,8 +512,8 @@ test "modify validates runtime changes and surviving requirements before consumi
     try expectError(error.RequiredComponentRemoved, registry.modify(id, insert, &.{position}));
     try registry.modify(id, insert, &.{root});
     insert = .{ .allocator = allocator };
-    try expect(registry.hasComponent(id, position));
-    try expect(!registry.hasComponent(id, root));
+    try expect(registry.hasComp(id, position));
+    try expect(!registry.hasComp(id, root));
     // A no-op still consumes an empty bundle's retained allocation.
     try insert.map.ensureTotalCapacity(allocator, 1);
     try registry.modify(id, insert, &.{});

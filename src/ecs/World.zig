@@ -173,29 +173,36 @@ pub fn entityCount(self: *const @This()) usize {
     return self.entity_reg.len();
 }
 
+/// Checks for a registered component id without creating storage.
+pub fn hasComp(self: *const @This(), id: Entity.Id, comp_id: component.Id) bool {
+    return self.entity_reg.hasComp(id, comp_id);
+}
+
+/// Borrows component bytes; storage growth or structural changes may invalidate them.
+pub fn getComp(self: *const @This(), id: Entity.Id, comp_id: component.Id) ?[]const u8 {
+    return self.entity_reg.getComp(id, comp_id);
+}
+
+/// Mutably borrows component bytes with the same lookup and lifetime rules as getComp.
+pub fn getCompMut(self: *@This(), id: Entity.Id, comp_id: component.Id) ?[]u8 {
+    return self.entity_reg.getCompMut(id, comp_id);
+}
+
 /// Checks for a component without registering its type.
-pub fn hasComponent(self: *const @This(), id: Entity.Id, comptime T: type) bool {
-    component.assertComponent(T, "hasComponent");
-    const comp_id = self.entity_reg.comp_reg.idOf(T) orelse return false;
-    return self.entity_reg.hasComponent(id, comp_id);
+pub fn hasTypedComp(self: *const @This(), id: Entity.Id, comptime T: type) bool {
+    return self.entity_reg.hasTypedComp(id, T);
 }
 
 /// Borrows a component without registering its type; returns null if absent.
 /// Storage growth or structural changes may invalidate the pointer.
-pub fn getComponent(self: *const @This(), id: Entity.Id, comptime T: type) ?*const T {
-    component.assertComponent(T, "getComponent");
-    const comp_id = self.entity_reg.comp_reg.idOf(T) orelse return null;
-    const bytes = self.entity_reg.getComponent(id, comp_id) orelse return null;
-    return @ptrCast(@alignCast(bytes.ptr));
+pub fn getTypedComp(self: *const @This(), id: Entity.Id, comptime T: type) ?*const T {
+    return self.entity_reg.getTypedComp(id, T);
 }
 
 /// Mutably borrows a component without registering its type; returns null if absent.
 /// Storage growth or structural changes may invalidate the pointer.
-pub fn getComponentMut(self: *@This(), id: Entity.Id, comptime T: type) ?*T {
-    component.assertComponent(T, "getComponentMut");
-    const comp_id = self.entity_reg.comp_reg.idOf(T) orelse return null;
-    const bytes = self.entity_reg.getComponentMut(id, comp_id) orelse return null;
-    return @ptrCast(@alignCast(bytes.ptr));
+pub fn getTypedCompMut(self: *@This(), id: Entity.Id, comptime T: type) ?*T {
+    return self.entity_reg.getTypedCompMut(id, T);
 }
 
 const expect = std.testing.expect;
@@ -250,16 +257,26 @@ test "addEntity registers components and creates an entity" {
     try expect(created.archetype_id.isValid());
     try expectEqual(1, created.sparse_comps.items.len);
     try expect(world.getEntityMut(id).?.id.eql(id));
-    try expect(readonly.hasComponent(id, Position));
-    try expect(readonly.hasComponent(id, Health));
-    try expectEqual(3, readonly.getComponent(id, Position).?.x);
-    try expectEqual(4, readonly.getComponent(id, Position).?.y);
-    try expectEqual(7, readonly.getComponent(id, Health).?.value);
+    try expect(readonly.hasTypedComp(id, Position));
+    try expect(readonly.hasTypedComp(id, Health));
+    try expectEqual(3, readonly.getTypedComp(id, Position).?.x);
+    try expectEqual(4, readonly.getTypedComp(id, Position).?.y);
+    try expectEqual(7, readonly.getTypedComp(id, Health).?.value);
+    inline for (.{ Position, Health }) |T| {
+        const comp_id = world.compReg().idOf(T).?;
+        try expect(readonly.hasComp(id, comp_id));
+        const bytes = readonly.getComp(id, comp_id).?;
+        const mutable = world.getCompMut(id, comp_id).?;
+        try expect(@TypeOf(bytes) == []const u8);
+        try expect(@TypeOf(mutable) == []u8);
+        try expectEqual(@intFromPtr(bytes.ptr), @intFromPtr(readonly.getTypedComp(id, T).?));
+        try expectEqual(@intFromPtr(mutable.ptr), @intFromPtr(world.getTypedCompMut(id, T).?));
+    }
 
-    world.getComponentMut(id, Position).?.x = 9;
-    world.getComponentMut(id, Health).?.value = 11;
-    try expectEqual(9, readonly.getComponent(id, Position).?.x);
-    try expectEqual(11, readonly.getComponent(id, Health).?.value);
+    world.getTypedCompMut(id, Position).?.x = 9;
+    world.getTypedCompMut(id, Health).?.value = 11;
+    try expectEqual(9, readonly.getTypedComp(id, Position).?.x);
+    try expectEqual(11, readonly.getTypedComp(id, Health).?.value);
 
     // A non-component field is a compile error:
     // _ = world.addEntity(.{ @as(u32, 1) });
@@ -277,15 +294,15 @@ test "modifyEntity accepts typed changes with nested bundles and absent removals
         .id = id,
         .insert = .{Transform{ .position = .{ .x = 1, .y = 2 } }},
     });
-    try expectEqual(1, world.getComponent(id, Position).?.x);
-    try expect(!world.hasComponent(id, Health));
+    try expectEqual(1, world.getTypedComp(id, Position).?.x);
+    try expect(!world.hasTypedComp(id, Health));
     try expect(world.compReg().idOf(Missing) == null);
 
     const RequestB = Entity.Change(.{ .insert = &.{Health}, .remove = &.{Transform} });
     const change: RequestB = .{ .id = id, .insert = .{Health{ .value = 9 }} };
     try world.modifyEntity(RequestB, change);
-    try expect(!world.hasComponent(id, Position));
-    try expectEqual(9, world.getComponent(id, Health).?.value);
+    try expect(!world.hasTypedComp(id, Position));
+    try expectEqual(9, world.getTypedComp(id, Health).?.value);
     try world.modifyEntity(Entity.Change(.{}), .{ .id = id });
     try world.modifyEntity(Entity.Change(.{ .remove = &.{Health} }), .{ .id = id });
     try world.modifyEntity(Entity.Change(.{ .insert = &.{Position} }), .{
@@ -321,9 +338,9 @@ test "component access does not register types" {
 
     inline for (.{ Position, Health }) |T| {
         try expect(world.compReg().idOf(T) == null);
-        try expect(!readonly.hasComponent(id, T));
-        try expect(readonly.getComponent(id, T) == null);
-        try expect(world.getComponentMut(id, T) == null);
+        try expect(!readonly.hasTypedComp(id, T));
+        try expect(readonly.getTypedComp(id, T) == null);
+        try expect(world.getTypedCompMut(id, T) == null);
         try expect(world.compReg().idOf(T) == null);
     }
 }
@@ -342,21 +359,21 @@ test "component access and modification support zero sized and highly aligned ty
         const readonly: *const @This() = &world;
 
         const tag = try world.addEntity(.{Tag{}});
-        try expect(readonly.getComponent(tag, Tag) != null);
-        world.getComponentMut(tag, Tag).?.* = .{};
+        try expect(readonly.getTypedComp(tag, Tag) != null);
+        world.getTypedCompMut(tag, Tag).?.* = .{};
 
         const aligned = try world.addEntity(.{Aligned{ .value = 13 }});
-        try expectEqual(13, readonly.getComponent(aligned, Aligned).?.value);
-        world.getComponentMut(aligned, Aligned).?.value = 23;
-        try expectEqual(23, readonly.getComponent(aligned, Aligned).?.value);
+        try expectEqual(13, readonly.getTypedComp(aligned, Aligned).?.value);
+        world.getTypedCompMut(aligned, Aligned).?.value = 23;
+        try expectEqual(23, readonly.getTypedComp(aligned, Aligned).?.value);
 
         try world.modifyEntity(Entity.Change(.{ .insert = &.{Aligned}, .remove = &.{Tag} }), .{
             .id = tag,
             .insert = .{Aligned{ .value = 31 }},
         });
-        try expect(!world.hasComponent(tag, Tag));
-        try expectEqual(31, world.getComponent(tag, Aligned).?.value);
-        try expectEqual(23, world.getComponent(aligned, Aligned).?.value);
+        try expect(!world.hasTypedComp(tag, Tag));
+        try expectEqual(31, world.getTypedComp(tag, Aligned).?.value);
+        try expectEqual(23, world.getTypedComp(aligned, Aligned).?.value);
     }
 }
 
@@ -368,8 +385,8 @@ test "batch entity helpers store rows and preserve a successful prefix on error"
         .{ Position{ .x = 1, .y = 2 }, Health{ .value = 3 } },
         .{ Health{ .value = 6 }, Position{ .x = 4, .y = 5 } },
     }, &batch_ids);
-    try expectEqual(1, world.getComponent(batch_ids[0], Position).?.x);
-    try expectEqual(6, world.getComponent(batch_ids[1], Health).?.value);
+    try expectEqual(1, world.getTypedComp(batch_ids[0], Position).?.x);
+    try expectEqual(6, world.getTypedComp(batch_ids[1], Health).?.value);
 
     var calls: usize = 0;
     var ids: [3]Entity.Id = undefined;
@@ -378,7 +395,7 @@ test "batch entity helpers store rows and preserve a successful prefix on error"
         .{Huge{ .calls = &calls }},
         .{},
     }, &ids));
-    try expectEqual(9, world.getComponent(ids[0], Health).?.value);
+    try expectEqual(9, world.getTypedComp(ids[0], Health).?.value);
     try expect(ids[1].eql(.invalid));
     try expect(ids[2].eql(.invalid));
     try expectEqual(0, calls);

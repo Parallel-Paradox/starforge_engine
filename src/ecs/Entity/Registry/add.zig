@@ -92,7 +92,7 @@ pub fn addBatchImpl(
         return error.OutOfMemory;
     try self.entities.ensureTotalCapacity(allocator, final_len);
     try archetype.reserve(ids.len);
-    for (sparse_ids) |id| try self.sparse_reg.getById(id).?.reserve(ids.len);
+    for (sparse_ids) |id| try self.sparse_reg.getByIdMut(id).?.reserve(ids.len);
 
     // Prepare directly in inactive registry slots; their ids stay invalid until commit.
     // After preparation, publishing the successful prefix cannot fail.
@@ -143,7 +143,7 @@ fn prepareBatchEntity(
     errdefer entity.deinit(self.allocator);
     try entity.sparse_comps.ensureTotalCapacity(self.allocator, sparse_components.len);
     for (sparse_ids) |set_id| {
-        try self.sparse_reg.getById(set_id).?.reserveForEntity(id);
+        try self.sparse_reg.getByIdMut(set_id).?.reserveForEntity(id);
         entity.sparse_comps.appendAssumeCapacity(set_id);
     }
     const base = entry.archetype.meta.signature;
@@ -176,7 +176,7 @@ fn commitBatch(
         archetype.stageColumn(index, column.ptr[0 .. ids.len * size]);
     }
     for (sparse_columns, sparse_ids) |column, set_id| {
-        const set = self.sparse_reg.getById(set_id).?;
+        const set = self.sparse_reg.getByIdMut(set_id).?;
         const size = set.meta.size;
         set.appendBatchAssumeCapacity(ids, column.ptr[0 .. ids.len * size]);
     }
@@ -221,8 +221,7 @@ test "addBatch stages columns, reuses retired ids and preserves input buffers" {
             .x = @intCast(1 + i * 3),
             .y = @intCast(2 + i * 3),
         });
-        const set = &registry.sparse_reg.getByTypeId(TypeId.of(Health)).?.set;
-        try expectEqual(@as(u32, @intCast(3 + i * 3)), set.get(Health, id).?.value);
+        try expectEqual(@as(u32, @intCast(3 + i * 3)), registry.getTypedComp(id, Health).?.value);
         try expect(entity.signature.has(registry.comp_reg.idOf(Health).?));
         try expect(!archetype.meta.signature.has(registry.comp_reg.idOf(Health).?));
     }
@@ -387,12 +386,10 @@ test "add completes shared cyclic requirements and preserves explicit values" {
         try testing.expectArchetypeValue(archetype, G.Root, a.archetype_row, .{ .value = 1 });
         try testing.expectArchetypeValue(archetype, G.Left, a.archetype_row, .{});
         try testing.expectArchetypeValue(archetype, G.Left, b.archetype_row, .{ .value = 33 });
-        const right = &registry.sparse_reg.getByTypeId(TypeId.of(G.Right)).?.set;
-        const health = &registry.sparse_reg.getByTypeId(TypeId.of(Health)).?.set;
-        try expectEqual(22, right.get(G.Right, first).?.value);
-        try expectEqual(44, right.get(G.Right, second).?.value);
-        try expectEqual(55, health.get(Health, first).?.value);
-        try expectEqual(66, health.get(Health, second).?.value);
+        try expectEqual(22, registry.getTypedComp(first, G.Right).?.value);
+        try expectEqual(44, registry.getTypedComp(second, G.Right).?.value);
+        try expectEqual(55, registry.getTypedComp(first, Health).?.value);
+        try expectEqual(66, registry.getTypedComp(second, Health).?.value);
         try expectEqual(1, G.Right.calls);
         try expectEqual(2, G.Shared.created);
         try expectEqual(0, G.Shared.destroyed);
