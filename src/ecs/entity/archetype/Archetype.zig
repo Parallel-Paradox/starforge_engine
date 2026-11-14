@@ -183,7 +183,7 @@ pub fn iter(self: *@This()) Iter {
 }
 
 /// Returns an iterator positioned at the first unused slot, for `nextStorage`.
-/// Reserve capacity before iterating. Filling slots does not publish entities.
+/// Reserve capacity before iterating. Publish initialized slots with `commitRows`.
 pub fn iterUnused(self: *@This()) Iter {
     const row = self.len();
     return .{
@@ -314,6 +314,74 @@ fn growFirstChunk(self: *@This(), additional: usize) Allocator.Error!bool {
     self.chunks.items[0] = new_chunk;
 
     return fits;
+}
+
+/// Copies ids into the first unused rows without publishing them.
+///
+/// # Unsafe
+///
+/// Reserve capacity first, then initialize all columns before `commitRows`.
+/// The source must not overlap the destination.
+pub fn stageEntities(self: *@This(), entities: []const EntityId) void {
+    const row = self.len();
+    std.debug.assert(entities.len <= self.capacity() - row);
+    @memcpy(self.ids.allocatedSlice()[row..][0..entities.len], entities);
+}
+
+/// Copies packed component values into a column's first unused rows.
+/// Managed values remain caller-owned until their rows are published.
+///
+/// # Unsafe
+///
+/// Reserve capacity first. Bytes must contain whole values and must not overlap
+/// the destination.
+pub fn stageColumn(self: *@This(), column: usize, bytes: []const u8) void {
+    std.debug.assert(column < self.meta.columns.items.len);
+    const size = self.meta.columns.items[column].meta.size;
+    if (size == 0) {
+        std.debug.assert(bytes.len == 0);
+        return;
+    }
+
+    const start = self.len();
+    std.debug.assert(bytes.len % size == 0);
+    std.debug.assert(bytes.len / size <= self.capacity() - start);
+
+    const offset = self.layout.column_offsets.items[column];
+    var row = start;
+    var remaining = bytes;
+    while (remaining.len != 0) {
+        const chunk = &self.chunks.items[row / self.layout.capacity];
+        const row_in_chunk = row % self.layout.capacity;
+        const count = @min(remaining.len / size, self.layout.capacity - row_in_chunk);
+        const byte_count = count * size;
+        const dest = chunk.ptr + offset + row_in_chunk * size;
+        @memcpy(dest[0..byte_count], remaining[0..byte_count]);
+        row += count;
+        remaining = remaining[byte_count..];
+    }
+}
+
+/// Publishes `added` rows.
+///
+/// # Unsafe
+///
+/// The caller must initialize every ID and column in the `added` unused slots
+/// before calling.
+pub fn commitRows(self: *@This(), added: usize) void {
+    var row = self.len();
+    std.debug.assert(added <= self.capacity() - row);
+    var remaining = added;
+    while (remaining != 0) {
+        const chunk = &self.chunks.items[row / self.layout.capacity];
+        const row_in_chunk = row % self.layout.capacity;
+        std.debug.assert(chunk.len == row_in_chunk);
+        const count = @min(remaining, self.layout.capacity - row_in_chunk);
+        chunk.len += count;
+        row += count;
+        remaining -= count;
+    }
+    self.ids.items.len = row;
 }
 
 const expect = std.testing.expect;
@@ -678,14 +746,30 @@ test "row removal across chunks transfers or destroys each managed component onc
         try expectEqual(3, arch.chunks.items.len);
         const large_column = arch.meta.id_to_col.get(TypeId.of(Large)).?;
         const other_column = arch.meta.id_to_col.get(TypeId.of(Other)).?;
-        for (0..3) |index| {
-            const row = arch.appendUninitAssumeCapacity(EntityId.init(@intCast(index), 1));
-            const value = arch.typedAt(Large, large_column, row).ptr;
-            value.calls = &large_calls[index];
-            @memset(&value.bytes, @intCast(index + 10));
-            arch.typedAt(Other, other_column, row).ptr.* = .{ .calls = &other_calls[index] };
-            try expectEqual(index, row);
+        for ([_]usize{ 1, 0, 2 }) |count| {
+            const start = arch.len();
+            var ids: [2]EntityId = undefined;
+            var large_values: [2]Large = undefined;
+            var other_values: [2]Other = undefined;
+            for (start..start + count, 0..) |index, staged| {
+                ids[staged] = EntityId.init(@intCast(index), 1);
+                large_values[staged].calls = &large_calls[index];
+                @memset(&large_values[staged].bytes, @intCast(index + 10));
+                other_values[staged] = .{ .calls = &other_calls[index] };
+            }
+            arch.stageEntities(ids[0..count]);
+            arch.stageColumn(large_column, std.mem.sliceAsBytes(large_values[0..count]));
+            arch.stageColumn(other_column, std.mem.sliceAsBytes(other_values[0..count]));
+            try expectEqual(start, arch.len());
+            var live_rows: usize = 0;
+            for (arch.chunks.items) |chunk| live_rows += chunk.len;
+            try expectEqual(start, live_rows);
+            arch.commitRows(count);
+            try expectEqual(start + count, arch.len());
         }
+        try expectEqual(3, arch.len());
+        try expectEqual(2, arch.chunks.items[0].len);
+        try expectEqual(1, arch.chunks.items[1].len);
         const old_capacity = arch.capacity();
         const old_ptrs = [_][*]u8{
             arch.chunks.items[0].ptr,
@@ -764,8 +848,19 @@ test "row removal destroys zero-sized managed values once including teardown" {
         var arch = try init(allocator, &.{tag}, registry);
         defer arch.deinit();
         try arch.reserve(3);
-        for (0..3) |index| _ = arch.appendUninitAssumeCapacity(EntityId.init(@intCast(index), 1));
+        var ids: [3]EntityId = undefined;
+        for (&ids, 0..) |*id, index| {
+            id.* = EntityId.init(@intCast(index), 1);
+        }
+        arch.stageEntities(&ids);
+        arch.stageColumn(0, &.{});
+        try expectEqual(0, arch.len());
+        try expectEqual(0, arch.chunks.items[0].len);
+        try expectEqual(0, ManagedTag.calls);
+        arch.commitRows(3);
         try expectEqual(0, arch.layout.size);
+        try expectEqual(3, arch.len());
+        try expectEqual(3, arch.chunks.items[0].len);
 
         arch.typedAt(ManagedTag, 0, 1).ptr.deinit();
         try expect(arch.swapRemoveWithoutDeinit(1).?.eql(EntityId.init(2, 1)));
