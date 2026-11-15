@@ -4,8 +4,6 @@ const Allocator = std.mem.Allocator;
 const engine = @import("engine");
 const ecs = engine.ecs;
 pub const Id = ecs.Id;
-const change = @import("change.zig");
-pub const Change = change.Change;
 pub const Signature = @import("Signature.zig");
 pub const Registry = @import("Registry/mod.zig");
 
@@ -37,7 +35,6 @@ pub fn deinit(self: *@This(), allocator: Allocator) void {
 }
 
 test {
-    _ = change;
     _ = Signature;
     _ = Registry;
 }
