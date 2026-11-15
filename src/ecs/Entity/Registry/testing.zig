@@ -33,6 +33,31 @@ pub const Probe = struct {
     }
 };
 
+pub const SparseProbe = struct {
+    pub const se_component: TestMark = .{ .storage = .sparse_set };
+    calls: *usize,
+
+    pub fn deinit(self: *@This()) void {
+        self.calls.* += 1;
+    }
+};
+
+pub const DenseDefault = struct {
+    pub const se_component: TestMark = .{};
+    value: usize align(64),
+    pub var created: usize = 0;
+    pub var destroyed: usize = 0;
+
+    pub fn default() @This() {
+        created += 1;
+        return .{ .value = created };
+    }
+
+    pub fn deinit(_: *@This()) void {
+        destroyed += 1;
+    }
+};
+
 pub const Tag = struct {
     pub const se_component: TestMark = .{};
 };

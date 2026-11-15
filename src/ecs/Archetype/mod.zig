@@ -378,6 +378,36 @@ pub fn stageColumn(self: *@This(), column: usize, bytes: []const u8) void {
     }
 }
 
+pub const ColumnTransfer = struct { source: usize, target: usize };
+
+/// Gathers live source rows into unused target rows for each selected column.
+/// The ownership is transferred to the target.
+///
+/// # Unsafe
+///
+/// Source and target must differ. Reserve target capacity first.
+pub fn stageColumnsFromSrc(
+    self: *@This(),
+    source: *const @This(),
+    columns: []const ColumnTransfer,
+    rows: []const usize,
+) void {
+    std.debug.assert(self != source);
+    std.debug.assert(rows.len <= self.capacity() - self.len());
+    for (columns) |column| {
+        const meta = self.meta.columns.items[column.target].meta;
+        std.debug.assert(meta.eql(source.meta.columns.items[column.source].meta));
+        const offset = self.layout.column_offsets.items[column.target];
+        for (rows, 0..) |source_row, i| {
+            const bytes = source.at(column.source, source_row).data;
+            const row = self.len() + i;
+            const chunk = self.chunks.items[row / self.layout.capacity];
+            const dest = chunk.ptr + offset + (row % self.layout.capacity) * meta.size;
+            @memcpy(dest[0..meta.size], bytes);
+        }
+    }
+}
+
 /// Publishes `added` rows.
 ///
 /// # Unsafe

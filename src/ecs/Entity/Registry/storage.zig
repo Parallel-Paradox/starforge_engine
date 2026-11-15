@@ -153,6 +153,7 @@ pub fn deinitDefaults(fields: anytype, normalized: anytype) void {
 }
 
 pub fn NormalizedFields(comptime defaults: bool, comptime Fields: type) type {
+    @setEvalBranchQuota(1_000_000);
     const types = Bundle.flatTypes(Fields);
     for (types, 0..) |T, i| {
         ecs.component.assertComponent(T, "normalize");

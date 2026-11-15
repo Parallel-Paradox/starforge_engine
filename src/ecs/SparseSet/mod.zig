@@ -185,6 +185,11 @@ pub fn deinit(self: *@This()) void {
 /// New sparse entries are invalid; existing mappings and live row counts stay unchanged.
 pub fn reserveForEntity(self: *@This(), entity_id: Entity.Id) Allocator.Error!void {
     try self.reserve(1);
+    try self.reserveSparseIndex(entity_id);
+}
+
+/// Extends the sparse index without reserving dense storage or publishing a value.
+pub fn reserveSparseIndex(self: *@This(), entity_id: Entity.Id) Allocator.Error!void {
     const required = entity_id.index.get() + 1;
     try self.sparse_to_dense.ensureTotalCapacity(self.allocator, required);
     while (self.sparse_to_dense.items.len < required)
