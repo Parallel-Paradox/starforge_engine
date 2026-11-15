@@ -4,19 +4,52 @@ const engine = @import("engine");
 const ecs = engine.ecs;
 const CompId = ecs.component.Id;
 const Entity = ecs.Entity;
+const SparseSet = ecs.SparseSet;
 const reflect = engine.reflect;
 const TypeId = reflect.TypeId;
 const Bundle = reflect.Bundle;
 const Default = reflect.Default;
 const Self = ecs.Entity.Registry;
 
-pub const Column = struct {
-    id: CompId,
-    ptr: []const u8,
+/// Borrows contiguous component ids ordered as archetype ids followed by sparse-set ids.
+/// All slices and their component storage must outlive the operation.
+/// ids.len must equal archetype.len + sparse_set.len; each id matches its column's position.
+pub const Columns = struct {
+    ids: []const CompId = &.{},
+    archetype: []const []const u8 = &.{},
+    sparse_set: []const []const u8 = &.{},
+    /// Resolved storage ids, one per sparse component column in the same order.
+    sparse_ids: []const SparseSet.Id = &.{},
+
+    pub fn archeCompIds(self: @This()) []const CompId {
+        return self.ids[0..self.archetype.len];
+    }
+
+    pub fn sparseCompIds(self: @This()) []const CompId {
+        return self.ids[self.archetype.len..];
+    }
+
+    pub fn getSparseId(self: @This(), id: CompId) ?SparseSet.Id {
+        for (self.sparseCompIds(), self.sparse_ids) |candidate, set_id| {
+            if (candidate.eql(id)) return set_id;
+        }
+        return null;
+    }
+
+    pub fn get(self: @This(), id: CompId) ?[]const u8 {
+        for (self.ids, 0..) |candidate, i| {
+            if (candidate.eql(id)) return if (i < self.archetype.len)
+                self.archetype[i]
+            else
+                self.sparse_set[i - self.archetype.len];
+        }
+        return null;
+    }
 };
 
-/// Transposes normalized rows into inline column arrays; registration may allocate.
+/// Transposes normalized rows and resolves component and sparse-set ids; may allocate.
 /// Values are shallow-copied and retain their existing ownership.
+/// Successful registrations and empty sparse sets remain if a later operation fails.
 pub fn group(
     self: *Self,
     batch: anytype,
@@ -29,6 +62,10 @@ pub fn group(
         inline for (@typeInfo(Arrays).@"struct".field_types, 0..) |Array, i| {
             const T = @typeInfo(Array).array.child;
             result.ids[column] = try self.comp_reg.register(T);
+            if (comptime std.mem.eql(u8, storage, "sparse_set")) {
+                const meta = self.comp_reg.getById(result.ids[column]).?;
+                result.sparse_ids[i] = (try self.sparse_reg.getOrCreate(meta.type_meta)).id;
+            }
             inline for (batch, 0..) |row, j| {
                 const types = @typeInfo(@TypeOf(@field(row, storage))).@"struct".field_types;
                 const index = comptime std.mem.indexOfScalar(type, types, T).?;
@@ -83,18 +120,34 @@ fn GroupedColumns(comptime Batch: type) type {
         archetype: ArchetypeArrays,
         sparse_set: SparseArrays,
         ids: [column_count]CompId,
+        sparse_ids: [column_count - archetype_count]SparseSet.Id,
 
-        /// Views borrow this value; keep it alive and stationary while using them.
-        pub fn columns(self: *const @This()) [column_count]Column {
-            var result: [column_count]Column = undefined;
-            comptime var column: usize = 0;
+        pub const Descriptors = struct {
+            ids: []const CompId,
+            sparse_ids: []const SparseSet.Id,
+            archetype: [archetype_count][]const u8,
+            sparse_set: [column_count - archetype_count][]const u8,
+
+            /// Borrows these descriptor arrays as well as the grouped values and ids.
+            pub fn view(self: *const @This()) Columns {
+                return .{
+                    .ids = self.ids,
+                    .sparse_ids = self.sparse_ids,
+                    .archetype = &self.archetype,
+                    .sparse_set = &self.sparse_set,
+                };
+            }
+        };
+
+        /// Returns inline descriptors borrowing this value; keep grouped data stationary.
+        /// Construct the slice view only after the returned descriptor arrays are in place.
+        pub fn columns(self: *const @This()) Descriptors {
+            var result: Descriptors = undefined;
+            result.ids = &self.ids;
+            result.sparse_ids = &self.sparse_ids;
             inline for (.{ "archetype", "sparse_set" }) |storage| {
                 inline for (@field(self, storage), 0..) |_, i| {
-                    result[column] = .{
-                        .id = self.ids[column],
-                        .ptr = std.mem.sliceAsBytes(&@field(self, storage)[i]),
-                    };
-                    column += 1;
+                    @field(result, storage)[i] = std.mem.sliceAsBytes(&@field(self, storage)[i]);
                 }
             }
             return result;
@@ -187,34 +240,38 @@ pub fn expandRequire(comptime list: []const type) []const type {
 pub fn validateColumns(
     self: *const Self,
     comptime require_closed: bool,
-    archetype_columns: []const Column,
-    sparse_columns: []const Column,
+    columns: Columns,
     row_count: usize,
 ) bool {
-    const groups = [_][]const Column{ archetype_columns, sparse_columns };
-    for (groups, 0..) |columns, group_index| {
-        const storage: ecs.component.Storage = if (group_index == 0) .archetype else .sparse_set;
-        for (columns, 0..) |column, i| {
-            const meta = self.comp_reg.getById(column.id) orelse return false;
-            if (meta.storage != storage) return false;
-            const bytes = std.math.mul(usize, meta.type_meta.size, row_count) catch return false;
-            if (column.ptr.len != bytes) return false;
-            for (columns[0..i]) |previous| {
-                if (previous.id.eql(column.id)) return false;
-            }
-            if (!require_closed) continue;
-            for (meta.require) |required| {
-                search: for (groups) |candidates| {
-                    for (candidates) |candidate| {
-                        if (candidate.id.eql(required)) break :search;
-                    }
-                } else return false;
-            }
+    if (columns.sparse_ids.len != columns.sparse_set.len) return false;
+    if (columns.archetype.len > columns.ids.len or
+        columns.sparse_set.len != columns.ids.len - columns.archetype.len) return false;
+    for (columns.ids, 0..) |id, i| {
+        const meta = self.comp_reg.getById(id) orelse return false;
+        const dense = i < columns.archetype.len;
+        const storage: ecs.component.Storage = if (dense) .archetype else .sparse_set;
+        if (meta.storage != storage) return false;
+        if (!dense) {
+            const set_id = columns.sparse_ids[i - columns.archetype.len];
+            const set = self.sparse_reg.getById(set_id) orelse return false;
+            if (!set.meta.eql(meta.type_meta)) return false;
+        }
+        const data = if (dense)
+            columns.archetype[i]
+        else
+            columns.sparse_set[i - columns.archetype.len];
+        const bytes = std.math.mul(usize, meta.type_meta.size, row_count) catch return false;
+        if (data.len != bytes) return false;
+        for (columns.ids[0..i]) |previous| if (previous.eql(id)) return false;
+        if (!require_closed) continue;
+        for (meta.require) |required| {
+            for (columns.ids) |candidate| {
+                if (candidate.eql(required)) break;
+            } else return false;
         }
     }
     return true;
 }
-
 /// Stably partitions component types by their declared storage.
 pub fn splitByStorage(comptime list: []const type) struct {
     archetype: []const type,
@@ -337,15 +394,34 @@ test "group transposes reordered normalized rows and borrows the final storage" 
     var copied = original;
     copied.archetype[0][0].x = 9;
     const columns = copied.columns();
+    var descriptors = columns;
+    const view = descriptors.view();
+    try expect(view.ids.ptr == &copied.ids);
+    try expect(view.sparse_ids.ptr == &copied.sparse_ids);
+    try expect(view.getSparseId(copied.ids[2]).?.eql(copied.sparse_ids[0]));
+    try expect(view.getSparseId(copied.ids[0]) == null);
+    const set = registry.sparse_reg.getById(view.sparse_ids[0]).?;
+    try expect(set.meta.id.eql(TypeId.of(Health)));
+    try expectEqual(0, set.len());
+    try expect(view.archetype.ptr == &descriptors.archetype);
+    try expect(view.sparse_set.ptr == &descriptors.sparse_set);
+    try expect(view.archeCompIds()[0].eql(copied.ids[0]));
+    try expect(view.sparseCompIds()[0].eql(copied.ids[2]));
+    try expect(view.get(copied.ids[0]).?.ptr == columns.archetype[0].ptr);
+    try expect(view.get(copied.ids[2]).?.ptr == columns.sparse_set[0].ptr);
+    try expect(view.get(.invalid) == null);
     try expectEqual(2, @TypeOf(copied).row_count);
     try expectEqual(2, @TypeOf(copied).archetype_count);
-    try expectEqual(3, columns.len);
-    try expect(columns[0].id.eql(registry.comp_reg.idOf(Position).?));
-    try expect(columns[1].id.eql(registry.comp_reg.idOf(Probe).?));
-    try expect(columns[2].id.eql(registry.comp_reg.idOf(Health).?));
-    try expectEqual(@intFromPtr(&copied.archetype[0]), @intFromPtr(columns[0].ptr.ptr));
-    const positions: []const Position = @alignCast(std.mem.bytesAsSlice(Position, columns[0].ptr));
-    const health: []const Health = @alignCast(std.mem.bytesAsSlice(Health, columns[2].ptr));
+    try expectEqual(3, columns.ids.len);
+    try expect(columns.ids[0].eql(registry.comp_reg.idOf(Position).?));
+    try expect(columns.ids[1].eql(registry.comp_reg.idOf(Probe).?));
+    try expect(columns.ids[2].eql(registry.comp_reg.idOf(Health).?));
+    try expectEqual(@intFromPtr(&copied.archetype[0]), @intFromPtr(columns.archetype[0].ptr));
+    const positions: []const Position = @alignCast(std.mem.bytesAsSlice(
+        Position,
+        columns.archetype[0],
+    ));
+    const health: []const Health = @alignCast(std.mem.bytesAsSlice(Health, columns.sparse_set[0]));
     try expectEqual(Position{ .x = 9, .y = 2 }, positions[0]);
     try expectEqual(Position{ .x = 4, .y = 5 }, positions[1]);
     try expectEqual(3, health[0].value);
@@ -361,17 +437,21 @@ test "group supports fixed arrays, empty batches and zero sized columns" {
     const grouped = try group(&registry, [_]@TypeOf(row){ row, row });
     const columns = grouped.columns();
     try expectEqual(2, @TypeOf(grouped).row_count);
-    try expectEqual(0, columns[0].ptr.len);
-    try expectEqual(2 * @sizeOf(Health), columns[1].ptr.len);
-    try expectEqual(0, columns[2].ptr.len);
+    try expectEqual(0, columns.archetype[0].len);
+    try expectEqual(2 * @sizeOf(Health), columns.sparse_set[0].len);
+    try expectEqual(0, columns.sparse_set[1].len);
     try expectEqual(7, grouped.sparse_set[0][1].value);
     const empty = try group(&registry, .{});
-    try expectEqual(0, empty.columns().len);
+    try expectEqual(0, empty.columns().ids.len);
     try expectEqual(0, @TypeOf(empty).row_count);
     const typed_empty = try group(&registry, [0]@TypeOf(row){});
     try expectEqual(0, @TypeOf(typed_empty).row_count);
-    try expectEqual(3, typed_empty.columns().len);
-    for (typed_empty.columns()) |column| try expectEqual(0, column.ptr.len);
+    try expectEqual(3, typed_empty.columns().ids.len);
+    const empty_columns = typed_empty.columns();
+    try expectEqual(2, empty_columns.sparse_ids.len);
+    for (empty_columns.sparse_ids, columns.sparse_ids) |a, b| try expect(a.eql(b));
+    for (empty_columns.archetype) |bytes| try expectEqual(0, bytes.len);
+    for (empty_columns.sparse_set) |bytes| try expectEqual(0, bytes.len);
 }
 
 test "validateColumns checks shared cyclic requirements across storage groups" {
@@ -379,21 +459,37 @@ test "validateColumns checks shared cyclic requirements across storage groups" {
     var registry = Self.init(std.testing.allocator);
     defer registry.deinit();
     _ = try registry.comp_reg.register(G.Root);
-    // Zero rows isolate dependency checks from byte-length validation.
-    const dense = [_]Column{
-        .{ .id = registry.comp_reg.idOf(G.Left).?, .ptr = &.{} },
-        .{ .id = registry.comp_reg.idOf(G.Root).?, .ptr = &.{} },
-        .{ .id = registry.comp_reg.idOf(G.Shared).?, .ptr = &.{} },
+    const ids = [_]CompId{
+        registry.comp_reg.idOf(G.Left).?,   registry.comp_reg.idOf(G.Root).?,
+        registry.comp_reg.idOf(G.Shared).?, registry.comp_reg.idOf(G.Right).?,
     };
-    const sparse = [_]Column{.{ .id = registry.comp_reg.idOf(G.Right).?, .ptr = &.{} }};
-    try expect(validateColumns(&registry, true, &dense, &sparse, 0));
-    try expect(!validateColumns(&registry, true, dense[0..2], &sparse, 0));
-    try expect(!validateColumns(&registry, true, &dense, &.{}, 0));
-    try expect(!validateColumns(&registry, true, &.{}, &sparse, 0));
-    try expect(validateColumns(&registry, false, dense[0..2], &sparse, 0));
-    try expect(validateColumns(&registry, false, &dense, &.{}, 0));
-    try expect(validateColumns(&registry, false, &.{}, &sparse, 0));
+    const complete: Columns = .{
+        .ids = &ids,
+        .archetype = &.{ &.{}, &.{}, &.{} },
+        .sparse_set = &.{&.{}},
+        .sparse_ids = &.{(try registry.sparse_reg.getOrCreate(reflect.TypeMeta.of(G.Right))).id},
+    };
+    try expect(validateColumns(&registry, true, complete, 0));
+    const incomplete = [_]Columns{
+        .{
+            .ids = &.{ ids[0], ids[1], ids[3] },
+            .archetype = &.{ &.{}, &.{} },
+            .sparse_set = &.{&.{}},
+            .sparse_ids = complete.sparse_ids,
+        },
+        .{ .ids = ids[0..3], .archetype = complete.archetype },
+        .{
+            .ids = ids[3..],
+            .sparse_set = complete.sparse_set,
+            .sparse_ids = complete.sparse_ids,
+        },
+    };
+    for (incomplete) |columns| {
+        try expect(!validateColumns(&registry, true, columns, 0));
+        try expect(validateColumns(&registry, false, columns, 0));
+    }
 }
+
 test "validateColumns rejects unknown, stale and reserved column ids" {
     var registry = Self.init(std.testing.allocator);
     defer registry.deinit();
@@ -401,11 +497,11 @@ test "validateColumns rejects unknown, stale and reserved column ids" {
     const reserved = try registry.comp_reg.reserve(TypeId.of(Probe));
     const stale = CompId.init(position.index.get(), position.generation.next().get());
     inline for (.{ true, false }) |require_closed| {
-        const valid = [_]Column{.{ .id = position, .ptr = &.{} }};
-        try expect(validateColumns(&registry, require_closed, &valid, &.{}, 0));
+        const valid: Columns = .{ .ids = &.{position}, .archetype = &.{&.{}} };
+        try expect(validateColumns(&registry, require_closed, valid, 0));
         for ([_]CompId{ .invalid, CompId.init(100, 0), stale, reserved }) |invalid| {
-            const columns = [_]Column{.{ .id = invalid, .ptr = &.{} }};
-            try expect(!validateColumns(&registry, require_closed, &columns, &.{}, 0));
+            const columns: Columns = .{ .ids = &.{invalid}, .archetype = &.{&.{}} };
+            try expect(!validateColumns(&registry, require_closed, columns, 0));
         }
     }
 }
@@ -417,21 +513,53 @@ test "validateColumns rejects wrong storage, duplicates, lengths and size overfl
     const health = try registry.comp_reg.register(Health);
     const positions = [_]Position{ .{ .x = 1, .y = 2 }, .{ .x = 3, .y = 4 } };
     const healths = [_]Health{ .{ .value = 5 }, .{ .value = 6 } };
-    const dense = Column{ .id = position, .ptr = std.mem.sliceAsBytes(&positions) };
-    const sparse = Column{ .id = health, .ptr = std.mem.sliceAsBytes(&healths) };
-    const truncated = Column{ .id = position, .ptr = dense.ptr[0 .. dense.ptr.len - 1] };
+    const dense = std.mem.sliceAsBytes(&positions);
+    const sparse = std.mem.sliceAsBytes(&healths);
+    const set_id = (try registry.sparse_reg.getOrCreate(reflect.TypeMeta.of(Health))).id;
+    const wrong_set = (try registry.sparse_reg.getOrCreate(reflect.TypeMeta.of(SparseTag))).id;
+    const stale_set = SparseSet.Id.init(set_id.index.get(), set_id.generation.next().get());
+    const valid: Columns = .{
+        .ids = &.{ position, health },
+        .archetype = &.{dense},
+        .sparse_set = &.{sparse},
+        .sparse_ids = &.{set_id},
+    };
+    const invalid = [_]Columns{
+        .{
+            .ids = &.{ health, position },
+            .archetype = &.{sparse},
+            .sparse_set = &.{dense},
+            .sparse_ids = &.{set_id},
+        },
+        .{ .ids = &.{ position, position }, .archetype = &.{ dense, dense } },
+        .{
+            .ids = &.{ health, health },
+            .sparse_set = &.{ sparse, sparse },
+            .sparse_ids = &.{ set_id, set_id },
+        },
+        .{ .ids = &.{position}, .archetype = &.{dense[0 .. dense.len - 1]} },
+        .{ .ids = &.{position} },
+        .{ .archetype = &.{dense} },
+        .{ .ids = &.{position}, .archetype = &.{dense}, .sparse_set = &.{sparse} },
+    };
     inline for (.{ true, false }) |require_closed| {
-        try expect(validateColumns(&registry, require_closed, &.{dense}, &.{sparse}, 2));
-        try expect(!validateColumns(&registry, require_closed, &.{sparse}, &.{dense}, 2));
-        try expect(!validateColumns(&registry, require_closed, &.{ dense, dense }, &.{sparse}, 2));
-        try expect(!validateColumns(&registry, require_closed, &.{dense}, &.{ sparse, sparse }, 2));
+        try expect(validateColumns(&registry, require_closed, valid, 2));
+        var bad_sets = valid;
+        bad_sets.sparse_ids = &.{};
+        try expect(!validateColumns(&registry, require_closed, bad_sets, 2));
+        bad_sets.sparse_ids = &.{ set_id, set_id };
+        try expect(!validateColumns(&registry, require_closed, bad_sets, 2));
+        for ([_]SparseSet.Id{ .invalid, SparseSet.Id.init(100, 0), stale_set, wrong_set }) |id| {
+            bad_sets.sparse_ids = &.{id};
+            try expect(!validateColumns(&registry, require_closed, bad_sets, 2));
+        }
+        for (invalid) |columns|
+            try expect(!validateColumns(&registry, require_closed, columns, 2));
         for ([_]usize{ 0, 1, 3, std.math.maxInt(usize) }) |count|
-            try expect(!validateColumns(&registry, require_closed, &.{dense}, &.{sparse}, count));
-        try expect(!validateColumns(&registry, require_closed, &.{truncated}, &.{}, 2));
-        try expect(validateColumns(&registry, require_closed, &.{}, &.{}, 3));
+            try expect(!validateColumns(&registry, require_closed, valid, count));
+        try expect(validateColumns(&registry, require_closed, .{}, 3));
     }
 }
-
 test "normalize flattens bundles and preserves explicit component values" {
     const Nested = struct {
         pub const se_bundle: Bundle.Mark = .{};

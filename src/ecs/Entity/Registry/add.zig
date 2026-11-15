@@ -11,7 +11,7 @@ const reflect = engine.reflect;
 const TypeId = reflect.TypeId;
 const Self = ecs.Entity.Registry;
 const _storage = @import("storage.zig");
-const Column = _storage.Column;
+const Columns = _storage.Columns;
 const NormalizedFields = _storage.NormalizedFields;
 const normalize = _storage.normalize;
 const deinitDefaults = _storage.deinitDefaults;
@@ -53,8 +53,7 @@ pub fn addBatch(self: *Self, batch: anytype, ids: []Entity.Id) AddError!void {
 
     const grouped = try self.group(normalized);
     const columns = grouped.columns();
-    const boundary = @TypeOf(grouped).archetype_count;
-    try self.addBatchImpl(columns[0..boundary], columns[boundary..], ids);
+    try self.addBatchImpl(columns.view(), ids);
 }
 
 /// Borrows packed columns and caller-owned output storage. Inputs must not alias ECS storage.
@@ -63,36 +62,23 @@ pub fn addBatch(self: *Self, batch: anytype, ids: []Entity.Id) AddError!void {
 /// On error, preserves committed rows and ids; uncommitted values remain borrowed.
 pub fn addBatchImpl(
     self: *Self,
-    archetype_columns: []const Column,
-    sparse_columns: []const Column,
+    columns: Columns,
     ids: []Entity.Id,
 ) AddError!void {
     @memset(ids, .invalid);
-    std.debug.assert(self.validateColumns(true, archetype_columns, sparse_columns, ids.len));
+    std.debug.assert(self.validateColumns(true, columns, ids.len));
     if (ids.len == 0) return;
 
     const allocator = self.allocator;
-    const comp_ids = try allocator.alloc(CompId, archetype_columns.len + sparse_columns.len);
-    defer allocator.free(comp_ids);
-    const dense_count = archetype_columns.len;
-    for (archetype_columns, comp_ids[0..dense_count]) |column, *id| id.* = column.id;
-    for (sparse_columns, comp_ids[dense_count..]) |column, *id| id.* = column.id;
-    const entry = try self.arche_reg.getOrCreate(comp_ids[0..dense_count], self.comp_reg);
+    const entry = try self.arche_reg.getOrCreate(columns.archeCompIds(), self.comp_reg);
     const archetype = &entry.archetype;
-    const sparse_ids = try allocator.alloc(SparseSet.Id, sparse_columns.len);
-    defer allocator.free(sparse_ids);
-    for (sparse_columns, sparse_ids) |column, *id| {
-        const meta = self.comp_reg.getById(column.id).?;
-        id.* = (try self.sparse_reg.getOrCreate(meta.type_meta)).id;
-    }
-
     const reused = @min(ids.len, self.retired.items.len);
     const old_len = self.entities.items.len;
     const final_len = std.math.add(usize, old_len, ids.len - reused) catch
         return error.OutOfMemory;
     try self.entities.ensureTotalCapacity(allocator, final_len);
     try archetype.reserve(ids.len);
-    for (sparse_ids) |id| try self.sparse_reg.getByIdMut(id).?.reserve(ids.len);
+    for (columns.sparse_ids) |id| try self.sparse_reg.getByIdMut(id).?.reserve(ids.len);
 
     // Prepare directly in inactive registry slots; their ids stay invalid until commit.
     // After preparation, publishing the successful prefix cannot fail.
@@ -103,14 +89,15 @@ pub fn addBatchImpl(
             self.retired.items[self.retired.items.len - 1 - i]
         else
             Entity.Id.init(old_len + i - reused, 0);
-        var entity = prepareBatchEntity(
+        const rv = prepareBatchEntity(
             self,
             entry,
-            comp_ids[dense_count..],
-            sparse_ids,
+            columns.sparseCompIds(),
+            columns.sparse_ids,
             id,
             i,
-        ) catch |err| {
+        );
+        var entity = rv catch |err| {
             failure = err;
             break;
         };
@@ -125,7 +112,7 @@ pub fn addBatchImpl(
         else
             Entity.Id.init(old_len + i - reused, 0);
     }
-    commitBatch(self, archetype, archetype_columns, sparse_columns, sparse_ids, ids[0..prepared]);
+    commitBatch(self, archetype, columns, ids[0..prepared]);
     self.retired.items.len -= @min(prepared, reused);
     self.entities.items.len = old_len + prepared - @min(prepared, reused);
     if (failure) |err| return err;
@@ -162,23 +149,21 @@ fn prepareBatchEntity(
 fn commitBatch(
     self: *Self,
     archetype: *Archetype,
-    archetype_columns: []const Column,
-    sparse_columns: []const Column,
-    sparse_ids: []const SparseSet.Id,
+    columns: Columns,
     ids: []const Entity.Id,
 ) void {
     if (ids.len == 0) return;
     archetype.stageEntities(ids);
-    for (archetype_columns) |column| {
-        const meta = self.comp_reg.getById(column.id).?;
+    for (columns.archeCompIds(), columns.archetype) |comp_id, bytes| {
+        const meta = self.comp_reg.getById(comp_id).?;
         const index = archetype.meta.id_to_col.get(meta.typeId()).?;
         const size = meta.type_meta.size;
-        archetype.stageColumn(index, column.ptr[0 .. ids.len * size]);
+        archetype.stageColumn(index, bytes[0 .. ids.len * size]);
     }
-    for (sparse_columns, sparse_ids) |column, set_id| {
+    for (columns.sparse_set, columns.sparse_ids) |bytes, set_id| {
         const set = self.sparse_reg.getByIdMut(set_id).?;
         const size = set.meta.size;
-        set.appendBatchAssumeCapacity(ids, column.ptr[0 .. ids.len * size]);
+        set.appendBatchAssumeCapacity(ids, bytes[0 .. ids.len * size]);
     }
     archetype.commitRows(ids.len);
     for (ids) |id| self.entities.allocatedSlice()[id.index.get()].id = id;
@@ -329,13 +314,18 @@ test "addBatchImpl borrows runtime columns across chunks with zero sized sparse 
     var registry = Self.init(std.testing.allocator);
     var values: [37]Wide = undefined;
     for (&values, 0..) |*value, i| @memset(&value.bytes, @intCast(i));
-    const columns = [_]Column{
-        .{ .id = try registry.comp_reg.register(SparseTag), .ptr = &.{} },
-        .{ .id = try registry.comp_reg.register(Wide), .ptr = std.mem.sliceAsBytes(&values) },
+    const columns: Columns = .{
+        .ids = &.{
+            try registry.comp_reg.register(Wide),
+            try registry.comp_reg.register(SparseTag),
+        },
+        .archetype = &.{std.mem.sliceAsBytes(&values)},
+        .sparse_set = &.{&.{}},
+        .sparse_ids = &.{(try registry.sparse_reg.getOrCreate(reflect.TypeMeta.of(SparseTag))).id},
     };
     for (0..2) |batch_index| {
         var ids: [37]Entity.Id = undefined;
-        try registry.addBatchImpl(columns[1..], columns[0..1], &ids);
+        try registry.addBatchImpl(columns, &ids);
         const archetype = registry.arche_reg.getById(registry.get(ids[0]).?.archetype_id).?;
         const set = &registry.sparse_reg.getByTypeId(TypeId.of(SparseTag)).?.set;
         try expect(archetype.chunks.items.len > 1);

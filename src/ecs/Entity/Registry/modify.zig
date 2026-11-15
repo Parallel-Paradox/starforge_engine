@@ -19,7 +19,7 @@ const Self = ecs.Entity.Registry;
 const _storage = @import("storage.zig");
 const NormalizedFields = _storage.NormalizedFields;
 const normalize = _storage.normalize;
-const Column = _storage.Column;
+const Columns = _storage.Columns;
 
 pub const ModifyError = ecs.component.Registry.RegisterError ||
     Archetype.ChunkLayout.Error || Default.Error || error{
@@ -47,10 +47,9 @@ pub fn modify(
     fields: anytype,
     comptime remove: []const type,
 ) ModifyError!void {
-    const entity = self.get(id) orelse return error.UnknownEntity;
-    const archetype_id = entity.archetype_id;
+    if (!self.contains(id)) return error.UnknownEntity;
     var completed: usize = 0;
-    try self.modifyBatch(archetype_id, .{.{ id, fields }}, remove, &completed);
+    try self.modifyBatch(.{.{ id, fields }}, remove, &completed);
 }
 
 /// Processes .{ entity_id, fields } rows independently, stopping at the first error.
@@ -69,11 +68,10 @@ pub fn modifyMany(
 }
 
 /// Each row is .{ entity_id, fields }; explicit component sets must match across rows.
-/// All ids must be unique and belong to archetype_id, checked with debug assertions.
+/// All ids must be unique, live and belong to one archetype, checked with debug assertions.
 /// Fills missing insertion requirements and reports the committed prefix in completed.
 pub fn modifyBatch(
     self: *Self,
-    archetype_id: Archetype.Id,
     batch: anytype,
     comptime remove: []const type,
     completed: *usize,
@@ -97,7 +95,6 @@ pub fn modifyBatch(
     }
     const grouped = try self.group(normalized);
     const columns = grouped.columns();
-    const boundary = @TypeOf(grouped).archetype_count;
 
     const remove_types = comptime Bundle.flatTypes(@Tuple(remove));
     var remove_ids: [remove_types.len]CompId = undefined;
@@ -112,10 +109,8 @@ pub fn modifyBatch(
         }
     }
     try self.modifyBatchImpl(
-        archetype_id,
         &ids,
-        columns[0..boundary],
-        columns[boundary..],
+        columns.view(),
         remove_ids[0..remove_count],
         completed,
     );
@@ -177,28 +172,29 @@ const PreparedChange = struct {
     }
 };
 
-/// Borrows packed columns and unique live ids belonging to archetype_id.
+/// Borrows packed columns and unique live ids belonging to one archetype.
+/// The first entity determines the source archetype; debug assertions check the whole batch.
 /// Input buffers must not alias ECS storage. Only committed values transfer ownership.
 /// Fills requirements of explicit insertions; unrelated existing dependencies are not checked.
 /// On failure, commits the prepared prefix and reports its length through completed.
 pub fn modifyBatchImpl(
     self: *Self,
-    archetype_id: Archetype.Id,
     ids: []const Entity.Id,
-    archetype_columns: []const Column,
-    sparse_columns: []const Column,
+    columns: Columns,
     remove_ids: []const CompId,
     completed: *usize,
 ) ModifyError!void {
     completed.* = 0;
-    assertModifyBatch(self, archetype_id, ids, archetype_columns, sparse_columns);
+    std.debug.assert(self.validateColumns(false, columns, ids.len));
     if (ids.len == 0) return;
+    std.debug.assert(self.contains(ids[0]));
+    const archetype_id = self.get(ids[0]).?.archetype_id;
+    assertModifyBatch(self, archetype_id, ids);
 
     var plan = try planBatchChange(
         self,
         archetype_id,
-        archetype_columns,
-        sparse_columns,
+        columns,
         remove_ids,
         ids.len,
     );
@@ -225,10 +221,7 @@ fn assertModifyBatch(
     self: *const Self,
     archetype_id: Archetype.Id,
     ids: []const Entity.Id,
-    archetype_columns: []const Column,
-    sparse_columns: []const Column,
 ) void {
-    std.debug.assert(self.validateColumns(false, archetype_columns, sparse_columns, ids.len));
     for (ids, 0..) |id, i| {
         std.debug.assert(self.contains(id));
         std.debug.assert(self.get(id).?.archetype_id.eql(archetype_id));
@@ -241,16 +234,10 @@ fn hasId(ids: anytype, id: @TypeOf(ids[0])) bool {
     return false;
 }
 
-fn findColumn(columns: []const Column, id: CompId) ?[]const u8 {
-    for (columns) |column| if (column.id.eql(id)) return column.ptr;
-    return null;
-}
-
 fn planBatchChange(
     self: *Self,
     source_id: Archetype.Id,
-    archetype_columns: []const Column,
-    sparse_columns: []const Column,
+    columns: Columns,
     remove_ids: []const CompId,
     count: usize,
 ) ModifyError!BatchChange {
@@ -260,15 +247,14 @@ fn planBatchChange(
     for (remove_ids, 0..) |id, i| {
         if (self.comp_reg.getById(id) == null) return error.UnknownComponentType;
         if (hasId(remove_ids[0..i], id)) return error.DuplicateComponent;
-        if (findColumn(archetype_columns, id) != null or findColumn(sparse_columns, id) != null)
+        if (hasId(columns.ids, id))
             return error.ConflictingComponentChange;
     }
 
     // Walk only the insertion closure, including dependencies of already-present requirements.
     var required: std.ArrayList(CompId) = .empty;
     defer required.deinit(allocator);
-    for (archetype_columns) |column| try required.append(allocator, column.id);
-    for (sparse_columns) |column| try required.append(allocator, column.id);
+    try required.appendSlice(allocator, columns.ids);
     var cursor: usize = 0;
     while (cursor < required.items.len) : (cursor += 1) {
         const meta = self.comp_reg.getById(required.items[cursor]) orelse
@@ -284,7 +270,7 @@ fn planBatchChange(
     const source_meta = self.arche_reg.getById(source_id).?.meta;
     for (source_meta.columns.items, 0..) |column, i| {
         if (!hasId(remove_ids, column.id)) try dense_ids.append(allocator, column.id);
-        if (hasId(remove_ids, column.id) or findColumn(archetype_columns, column.id) != null)
+        if (hasId(remove_ids, column.id) or columns.get(column.id) != null)
             try plan.drops.append(allocator, i);
     }
     for (required.items) |id| {
@@ -294,11 +280,12 @@ fn planBatchChange(
                 if (!hasId(dense_ids.items, id)) try dense_ids.append(allocator, id);
             },
             .sparse_set => {
-                const set_id = (try self.sparse_reg.getOrCreate(meta.type_meta)).id;
+                const set_id = columns.getSparseId(id) orelse
+                    (try self.sparse_reg.getOrCreate(meta.type_meta)).id;
                 try plan.sparse.append(allocator, .{
                     .id = id,
                     .set_id = set_id,
-                    .input = findColumn(sparse_columns, id),
+                    .input = columns.get(id),
                 });
             },
         }
@@ -314,7 +301,7 @@ fn planBatchChange(
     const target = try self.arche_reg.getOrCreate(dense_ids.items, self.comp_reg);
     plan.target = target.id;
     for (target.archetype.meta.columns.items, 0..) |column, i| {
-        const input = findColumn(archetype_columns, column.id);
+        const input = columns.get(column.id);
         if (input == null) {
             if (source_meta.id_to_col.get(column.meta.id)) |source_column| {
                 try plan.copies.append(allocator, .{ .source = source_column, .target = i });
@@ -526,27 +513,23 @@ test "modifyBatch fills insertion closure even when an existing requirement is n
     try registry.addBatch(.{ .{Root{ .value = 1 }}, .{Root{ .value = 2 }} }, &ids);
     registry.getTypedCompMut(ids[0], Right).?.value = 91;
     var completed: usize = 999;
-    var archetype_id = registry.get(ids[0]).?.archetype_id;
     // Removing a dependency is allowed, even with Root and Left still present.
     try registry.modifyBatch(
-        archetype_id,
         .{ .{ ids[0], .{} }, .{ ids[1], .{} } },
         &.{Shared},
         &completed,
     );
     try expectEqual(2, completed);
     try expectEqual(2, Shared.destroyed);
-    archetype_id = registry.get(ids[0]).?.archetype_id;
-    try registry.modifyBatch(archetype_id, .{.{ ids[1], .{} }}, &.{Right}, &completed);
+    try registry.modifyBatch(.{.{ ids[1], .{} }}, &.{Right}, &completed);
     // An unrelated insertion leaves the broken dependency alone.
     try registry.modifyBatch(
-        archetype_id,
         .{.{ ids[0], .{Health{ .value = 8 }} }},
         &.{},
         &completed,
     );
     try expect(!registry.hasTypedComp(ids[0], Shared));
-    try registry.modifyBatch(archetype_id, .{
+    try registry.modifyBatch(.{
         .{ ids[0], .{Root{ .value = 11 }} },
         .{ ids[1], .{Root{ .value = 12 }} },
     }, &.{}, &completed);
@@ -578,7 +561,7 @@ test "modifyBatch commits only the prefix whose sparse requirements can be const
     try registry.addMany(.{ .{Health{ .value = 3 }}, .{}, .{Health{ .value = 5 }} }, &ids);
     const source = registry.get(ids[0]).?.archetype_id;
     var completed: usize = 999;
-    try expectError(error.MissingRequirementDefault, registry.modifyBatch(source, .{
+    try expectError(error.MissingRequirementDefault, registry.modifyBatch(.{
         .{ ids[0], .{Root{ .value = 11 }} },
         .{ ids[1], .{Root{ .value = 12 }} },
         .{ ids[2], .{Root{ .value = 13 }} },
@@ -609,34 +592,37 @@ test "modifyBatch rejects conflicting changes and missing dense defaults before 
     const root = try registry.comp_reg.register(Root);
     const position = registry.comp_reg.idOf(Position).?;
     const values = [_]Root{.{}};
-    const columns = [_]Column{.{ .id = root, .ptr = std.mem.sliceAsBytes(&values) }};
+    const columns: Columns = .{ .ids = &.{root}, .archetype = &.{std.mem.sliceAsBytes(&values)} };
     var completed: usize = 999;
     try expectError(
         error.ConflictingComponentChange,
-        registry.modifyBatchImpl(source, &.{id}, &columns, &.{}, &.{root}, &completed),
+        registry.modifyBatchImpl(&.{id}, columns, &.{root}, &completed),
     );
     try expectEqual(0, completed);
     try expectError(
         error.RequiredComponentRemoved,
-        registry.modifyBatchImpl(source, &.{id}, &columns, &.{}, &.{position}, &completed),
+        registry.modifyBatchImpl(&.{id}, columns, &.{position}, &completed),
     );
     try expectError(
         error.MissingRequirementDefault,
-        registry.modifyBatchImpl(source, &.{id}, &columns, &.{}, &.{}, &completed),
+        registry.modifyBatchImpl(&.{id}, columns, &.{}, &completed),
     );
     try expectError(
         error.DuplicateComponent,
-        registry.modifyBatchImpl(source, &.{id}, &.{}, &.{}, &.{ position, position }, &completed),
+        registry.modifyBatchImpl(&.{id}, .{}, &.{ position, position }, &completed),
     );
     try expectError(
         error.UnknownComponentType,
-        registry.modifyBatchImpl(source, &.{id}, &.{}, &.{}, &.{.invalid}, &completed),
+        registry.modifyBatchImpl(&.{id}, .{}, &.{.invalid}, &completed),
     );
     try expectEqual(0, completed);
     try expect(registry.get(id).?.archetype_id.eql(source));
-    try registry.modifyBatch(source, .{}, &.{}, &completed);
+    try registry.modifyBatch(.{}, &.{}, &completed);
     try expectEqual(0, completed);
-    try registry.modifyBatch(source, .{.{ id, .{} }}, &.{Velocity}, &completed);
+    completed = 999;
+    try registry.modifyBatchImpl(&.{}, .{}, &.{}, &completed);
+    try expectEqual(0, completed);
+    try registry.modifyBatch(.{.{ id, .{} }}, &.{Velocity}, &completed);
     try expectEqual(1, completed);
 }
 
@@ -667,18 +653,17 @@ test "modifyBatch gathers noncontiguous rows across chunks and repairs swapped e
         value.* = .{ .dx = @intCast(i), .dy = 0 };
         expected[index] = value.dx;
     }
-    const columns = [_]Column{.{
-        .id = registry.comp_reg.idOf(Velocity).?,
-        .ptr = std.mem.sliceAsBytes(&values),
-    }};
+    const columns: Columns = .{
+        .ids = &.{registry.comp_reg.idOf(Velocity).?},
+        .archetype = &.{std.mem.sliceAsBytes(&values)},
+    };
     var completed: usize = 0;
-    try registry.modifyBatchImpl(source, &selected, &columns, &.{}, &.{}, &completed);
+    try registry.modifyBatchImpl(&selected, columns, &.{}, &completed);
     try expectEqual(selected.len, completed);
     try expect(registry.arche_reg.getById(source).?.chunks.items.len > 1);
     var batch: [27]struct { Entity.Id, struct { Velocity } } = undefined;
     for (&batch, selected, values) |*row, id, value| row.* = .{ id, .{value} };
-    const target = registry.get(selected[0]).?.archetype_id;
-    try registry.modifyBatch(target, batch, &.{}, &completed);
+    try registry.modifyBatch(batch, &.{}, &completed);
     try expectEqual(batch.len, completed);
     for (ids, 0..) |id, i| {
         const entity = registry.get(id).?;
@@ -710,14 +695,13 @@ test "modifyBatch releases replacements and removals and returns to shared signa
     const source = registry.get(ids[0]).?.archetype_id;
     var completed: usize = 0;
     // In-place dense replacement; sparse insertion order may differ between rows.
-    try registry.modifyBatch(source, .{
+    try registry.modifyBatch(.{
         .{ ids[0], .{ Probe{ .calls = &calls[2] }, SparseProbe{ .calls = &calls[3] } } },
         .{ ids[1], .{ SparseProbe{ .calls = &calls[3] }, Probe{ .calls = &calls[2] } } },
     }, &.{SparseTag}, &completed);
     try expectEqual([_]usize{ 2, 2, 0, 0 }, calls);
     try expectEqual(2, SparseTag.destroyed);
     try registry.modifyBatch(
-        source,
         .{ .{ ids[0], .{} }, .{ ids[1], .{} } },
         &.{SparseProbe},
         &completed,
@@ -729,7 +713,7 @@ test "modifyBatch releases replacements and removals and returns to shared signa
             registry.arche_reg.getById(source).?.meta.signature.mask.masks);
     }
     try expectEqual([_]usize{ 2, 2, 0, 2 }, calls);
-    try registry.modifyBatch(source, .{.{ ids[0], .{} }}, &.{Probe}, &completed);
+    try registry.modifyBatch(.{.{ ids[0], .{} }}, &.{Probe}, &completed);
     try expectEqual([_]usize{ 2, 2, 1, 2 }, calls);
     registry.deinit();
     live = false;
@@ -772,11 +756,11 @@ test "modifyBatch cleans the failed row when a runtime default rejects its stora
         .type_meta = TypeMeta.of(Root),
         .require = @constCast(&[_]CompId{ dense, sparse, broken }),
     });
-    const columns = [_]Column{.{ .id = root, .ptr = &.{} }};
+    const columns: Columns = .{ .ids = &.{root}, .archetype = &.{&.{}} };
     var completed: usize = 999;
     try expectError(
         error.UnknownRequirement,
-        registry.modifyBatchImpl(source, &ids, &columns, &.{}, &.{}, &completed),
+        registry.modifyBatchImpl(&ids, columns, &.{}, &completed),
     );
     try expectEqual(0, completed);
     _ = try registry.comp_reg.registerMeta(.{
@@ -785,7 +769,7 @@ test "modifyBatch cleans the failed row when a runtime default rejects its stora
     });
     try expectError(
         error.BufferSizeMismatch,
-        registry.modifyBatchImpl(source, &ids, &columns, &.{}, &.{}, &completed),
+        registry.modifyBatchImpl(&ids, columns, &.{}, &completed),
     );
     try expectEqual(1, completed);
     try expectEqual(2, DenseDefault.created);
@@ -826,14 +810,13 @@ fn exerciseFailures(allocator: Allocator, migrate: bool) !void {
         const fields = .{ Probe{ .calls = &calls[0] }, SparseProbe{ .calls = &calls[1] } };
         id.* = if (migrate) try registry.add(fields) else try registry.add(.{Root{}} ++ fields);
     }
-    const source = registry.get(ids[0]).?.archetype_id;
     var batch: [3]struct { Entity.Id, struct { Root, Probe, SparseProbe } } = undefined;
     for (&batch, ids) |*row, id| row.* = .{ id, .{
         Root{}, Probe{ .calls = &calls[2] }, SparseProbe{ .calls = &calls[3] },
     } };
     var completed: usize = 999;
     var failure: ?ModifyError = null;
-    registry.modifyBatch(source, batch, &.{}, &completed) catch |err| {
+    registry.modifyBatch(batch, &.{}, &completed) catch |err| {
         failure = err;
     };
     try expect(completed <= ids.len);

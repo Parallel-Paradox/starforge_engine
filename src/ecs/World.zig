@@ -140,12 +140,11 @@ pub fn modifyEntities(
 /// On error, only the completed prefix consumes input values.
 pub fn modifyEntityBatch(
     self: *@This(),
-    archetype_id: Archetype.Id,
     rows: anytype,
     comptime remove: []const type,
     completed: *usize,
 ) Entity.Registry.ModifyError!void {
-    return self.entity_reg.modifyBatch(archetype_id, rows, remove, completed);
+    return self.entity_reg.modifyBatch(rows, remove, completed);
 }
 
 /// Destroys the entity and its components, returning whether it was live.
@@ -444,16 +443,15 @@ test "modifyEntityBatch exposes requirement completion and partial success" {
     defer world.deinit();
     const a = try world.addEntity(.{Health{ .value = 1 }});
     const b = try world.addEntity(.{});
-    const source = world.getEntity(a).?.archetype_id;
     var completed: usize = 999;
-    try expectError(error.MissingRequirementDefault, world.modifyEntityBatch(source, .{
+    try expectError(error.MissingRequirementDefault, world.modifyEntityBatch(.{
         .{ a, .{Root{}} }, .{ b, .{Root{}} },
     }, &.{}, &completed));
     try expectEqual(1, completed);
     try expect(world.hasTypedComp(a, Root));
     try expect(!world.hasTypedComp(b, Root));
     try expectEqual(1, world.getTypedComp(a, Health).?.value);
-    try world.modifyEntityBatch(source, .{
+    try world.modifyEntityBatch(.{
         .{ b, .{ Root{}, Health{ .value = 2 } } },
     }, &.{}, &completed);
     try expectEqual(1, completed);
