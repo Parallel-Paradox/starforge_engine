@@ -21,6 +21,7 @@ pub const addBatch = _add.addBatch;
 pub const addBatchImpl = _add.addBatchImpl;
 pub const ModifyError = _modify.ModifyError;
 pub const modify = _modify.modify;
+pub const modifyMany = _modify.modifyMany;
 pub const modifyBatch = _modify.modifyBatch;
 pub const modifyBatchImpl = _modify.modifyBatchImpl;
 pub const hasComp = _storage.hasComp;

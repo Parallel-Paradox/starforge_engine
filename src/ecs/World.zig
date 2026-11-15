@@ -114,32 +114,38 @@ pub fn addEntityBatch(
     return self.entity_reg.addBatch(rows, ids);
 }
 
-pub const ModifyEntityError = Entity.Registry.ModifyError || ComponentRegistry.RegisterError;
-
-/// Applies a typed Entity.Change, consuming insertions only on success.
+/// Modifies one entity, consuming insertions only on success.
 /// Replaces existing values and ignores absent removals without registering them.
 /// May invalidate borrows and iterators.
 pub fn modifyEntity(
     self: *@This(),
-    comptime Request: type,
-    change: Request,
-) ModifyEntityError!void {
-    if (!self.entity_reg.contains(change.id)) return error.UnknownEntity;
-    inline for (Request.insert_types) |T| _ = try self.entity_reg.comp_reg.register(T);
+    id: Entity.Id,
+    fields: anytype,
+    comptime remove: []const type,
+) Entity.Registry.ModifyError!void {
+    return self.entity_reg.modify(id, fields, remove);
+}
 
-    var remove_ids: [Request.remove_types.len]component.Id = undefined;
-    var remove_count: usize = 0;
-    inline for (Request.remove_types) |T| {
-        if (self.entity_reg.comp_reg.idOf(T)) |id| {
-            if (self.entity_reg.comp_reg.getById(id) != null) {
-                remove_ids[remove_count] = id;
-                remove_count += 1;
-            }
-        }
-    }
-    var bundle = try Bundle.init(self.allocator, change.insert);
-    errdefer bundle.releaseStorage();
-    try self.entity_reg.modify(change.id, bundle, remove_ids[0..remove_count]);
+/// Modifies independent .{ entity_id, fields } rows, reporting the successful prefix.
+pub fn modifyEntities(
+    self: *@This(),
+    rows: anytype,
+    comptime remove: []const type,
+    completed: *usize,
+) Entity.Registry.ModifyError!void {
+    return self.entity_reg.modifyMany(rows, remove, completed);
+}
+
+/// Modifies unique entities in one archetype with matching explicit component sets.
+/// On error, only the completed prefix consumes input values.
+pub fn modifyEntityBatch(
+    self: *@This(),
+    archetype_id: Archetype.Id,
+    rows: anytype,
+    comptime remove: []const type,
+    completed: *usize,
+) Entity.Registry.ModifyError!void {
+    return self.entity_reg.modifyBatch(archetype_id, rows, remove, completed);
 }
 
 /// Destroys the entity and its components, returning whether it was live.
@@ -282,35 +288,30 @@ test "addEntity registers components and creates an entity" {
     // _ = world.addEntity(.{ @as(u32, 1) });
 }
 
-test "modifyEntity accepts typed changes with nested bundles and absent removals" {
+test "modifyEntity accepts nested bundles and absent removals" {
     const Missing = struct {
         pub const se_component: TestMark = .{};
     };
     var world = init(std.testing.allocator, std.testing.io);
     defer world.deinit();
     const id = try world.addEntity(.{Health{ .value = 7 }});
-    const RequestA = Entity.Change(.{ .insert = &.{Transform}, .remove = &.{ Health, Missing } });
-    try world.modifyEntity(RequestA, .{
-        .id = id,
-        .insert = .{Transform{ .position = .{ .x = 1, .y = 2 } }},
-    });
+    try world.modifyEntity(
+        id,
+        .{Transform{ .position = .{ .x = 1, .y = 2 } }},
+        &.{ Health, Missing },
+    );
     try expectEqual(1, world.getTypedComp(id, Position).?.x);
     try expect(!world.hasTypedComp(id, Health));
     try expect(world.compReg().idOf(Missing) == null);
 
-    const RequestB = Entity.Change(.{ .insert = &.{Health}, .remove = &.{Transform} });
-    const change: RequestB = .{ .id = id, .insert = .{Health{ .value = 9 }} };
-    try world.modifyEntity(RequestB, change);
+    try world.modifyEntity(id, .{Health{ .value = 9 }}, &.{Transform});
     try expect(!world.hasTypedComp(id, Position));
     try expectEqual(9, world.getTypedComp(id, Health).?.value);
-    try world.modifyEntity(Entity.Change(.{}), .{ .id = id });
-    try world.modifyEntity(Entity.Change(.{ .remove = &.{Health} }), .{ .id = id });
-    try world.modifyEntity(Entity.Change(.{ .insert = &.{Position} }), .{
-        .id = id,
-        .insert = .{Position{ .x = 3, .y = 4 }},
-    });
+    try world.modifyEntity(id, .{}, &.{});
+    try world.modifyEntity(id, .{}, &.{Health});
+    try world.modifyEntity(id, .{Position{ .x = 3, .y = 4 }}, &.{});
     try expectEqual(1, world.entityCount());
-    try expectError(error.UnknownEntity, world.modifyEntity(Entity.Change(.{}), .{ .id = .invalid }));
+    try expectError(error.UnknownEntity, world.modifyEntity(.invalid, .{}, &.{}));
 }
 
 test "addEntity delegates requirement completion to the entity registry" {
@@ -367,10 +368,7 @@ test "component access and modification support zero sized and highly aligned ty
         world.getTypedCompMut(aligned, Aligned).?.value = 23;
         try expectEqual(23, readonly.getTypedComp(aligned, Aligned).?.value);
 
-        try world.modifyEntity(Entity.Change(.{ .insert = &.{Aligned}, .remove = &.{Tag} }), .{
-            .id = tag,
-            .insert = .{Aligned{ .value = 31 }},
-        });
+        try world.modifyEntity(tag, .{Aligned{ .value = 31 }}, &.{Tag});
         try expect(!world.hasTypedComp(tag, Tag));
         try expectEqual(31, world.getTypedComp(tag, Aligned).?.value);
         try expectEqual(23, world.getTypedComp(aligned, Aligned).?.value);
@@ -402,6 +400,67 @@ test "batch entity helpers store rows and preserve a successful prefix on error"
     try expectEqual(3, world.entityCount());
 }
 
+test "modifyEntities supports heterogeneous rows and retains the successful prefix" {
+    var world = init(std.testing.allocator, std.testing.io);
+    defer world.deinit();
+    const a = try world.addEntity(.{Health{ .value = 1 }});
+    const b = try world.addEntity(.{Position{ .x = 2, .y = 3 }});
+    const c = try world.addEntity(.{});
+    var calls: usize = 0;
+    var huge: Huge = .{ .calls = &calls };
+    var completed: usize = 999;
+    try expectError(error.BufferTooLarge, world.modifyEntities(.{
+        .{ a, .{Position{ .x = 10, .y = 20 }} },
+        .{ b, .{Health{ .value = 30 }} },
+        .{ c, .{huge} },
+        .{ a, .{Position{ .x = 99, .y = 99 }} },
+    }, &.{}, &completed));
+    try expectEqual(2, completed);
+    try expectEqual(10, world.getTypedComp(a, Position).?.x);
+    try expectEqual(30, world.getTypedComp(b, Health).?.value);
+    try expectEqual(0, world.getEntity(c).?.signature.mask.count());
+    try expectEqual(0, calls);
+    huge.deinit();
+    try expectEqual(1, calls);
+    try world.modifyEntities(.{ .{ a, .{} }, .{ b, .{} } }, &.{Health}, &completed);
+    try expectEqual(2, completed);
+    try expect(!world.hasTypedComp(a, Health));
+    try expect(!world.hasTypedComp(b, Health));
+    try world.modifyEntities(.{}, &.{}, &completed);
+    try expectEqual(0, completed);
+    try expectError(error.UnknownEntity, world.modifyEntities(.{
+        .{ a, .{Health{ .value = 4 }} },
+        .{ Entity.Id.invalid, .{} },
+    }, &.{}, &completed));
+    try expectEqual(1, completed);
+    try expectEqual(4, world.getTypedComp(a, Health).?.value);
+}
+
+test "modifyEntityBatch exposes requirement completion and partial success" {
+    const Root = struct {
+        pub const se_component: TestMark = .{ .require = &.{Health} };
+    };
+    var world = init(std.testing.allocator, std.testing.io);
+    defer world.deinit();
+    const a = try world.addEntity(.{Health{ .value = 1 }});
+    const b = try world.addEntity(.{});
+    const source = world.getEntity(a).?.archetype_id;
+    var completed: usize = 999;
+    try expectError(error.MissingRequirementDefault, world.modifyEntityBatch(source, .{
+        .{ a, .{Root{}} }, .{ b, .{Root{}} },
+    }, &.{}, &completed));
+    try expectEqual(1, completed);
+    try expect(world.hasTypedComp(a, Root));
+    try expect(!world.hasTypedComp(b, Root));
+    try expectEqual(1, world.getTypedComp(a, Health).?.value);
+    try world.modifyEntityBatch(source, .{
+        .{ b, .{ Root{}, Health{ .value = 2 } } },
+    }, &.{}, &completed);
+    try expectEqual(1, completed);
+    try expectEqual(2, world.getTypedComp(b, Health).?.value);
+    try expect(world.getEntity(a).?.archetype_id.eql(world.getEntity(b).?.archetype_id));
+}
+
 test "addEntity and modifyEntity preserve input ownership on layout failure" {
     const allocator = std.testing.allocator;
     var world = init(allocator, std.testing.io);
@@ -415,10 +474,7 @@ test "addEntity and modifyEntity preserve input ownership on layout failure" {
     try expect(calls == 0);
 
     const id = try world.addEntity(.{});
-    try expectError(error.BufferTooLarge, world.modifyEntity(Entity.Change(.{ .insert = &.{Huge} }), .{
-        .id = id,
-        .insert = .{huge},
-    }));
+    try expectError(error.BufferTooLarge, world.modifyEntity(id, .{huge}, &.{}));
     try expectEqual(0, world.getEntity(id).?.signature.mask.count());
     try expectEqual(0, calls);
 
