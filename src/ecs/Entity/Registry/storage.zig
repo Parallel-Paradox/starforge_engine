@@ -51,7 +51,7 @@ fn GroupedColumns(comptime Batch: type) type {
     };
     const Row = if (rows.len != 0) rows[0] else switch (@typeInfo(Batch)) {
         .array => |info| info.child,
-        else => NormalizedFields(@TypeOf(.{})),
+        else => NormalizedFields(true, @TypeOf(.{})),
     };
     for (.{ "archetype", "sparse_set" }) |storage| {
         const types = @typeInfo(@FieldType(Row, storage)).@"struct".field_types;
@@ -110,11 +110,15 @@ fn ColumnArrays(comptime Row: type, comptime count: usize) type {
     return @Tuple(&arrays);
 }
 
-/// Flattens component fields, completes requirements, and groups values by storage.
-/// Explicit values take precedence; each missing requirement is default-constructed once.
-/// Duplicate explicit components and unsupported defaults are compile errors.
-pub fn normalize(fields: anytype) NormalizedFields(@TypeOf(fields)) {
-    const Result = NormalizedFields(@TypeOf(fields));
+/// Flattens component fields and groups values by storage.
+/// With defaults enabled, completes requirements and constructs each missing value once.
+/// Otherwise includes only explicit components, without requiring default constructors.
+/// Explicit values take precedence; duplicate explicit components are compile errors.
+pub fn normalize(
+    comptime defaults: bool,
+    fields: anytype,
+) NormalizedFields(defaults, @TypeOf(fields)) {
+    const Result = NormalizedFields(defaults, @TypeOf(fields));
     const values = Bundle.flat(fields);
     const types = @typeInfo(@TypeOf(values)).@"struct".field_types;
     var result: Result = undefined;
@@ -132,6 +136,7 @@ pub fn normalize(fields: anytype) NormalizedFields(@TypeOf(fields)) {
 
 /// Destroys only requirements default-constructed by normalize; explicit values stay borrowed.
 /// Pass a mutable pointer to the uncommitted normalized row, and call at most once.
+/// Does nothing for rows normalized with defaults disabled.
 pub fn deinitDefaults(fields: anytype, normalized: anytype) void {
     const explicit = comptime Bundle.flatTypes(@TypeOf(fields));
     inline for (.{ "archetype", "sparse_set" }) |storage| {
@@ -147,14 +152,14 @@ pub fn deinitDefaults(fields: anytype, normalized: anytype) void {
     }
 }
 
-pub fn NormalizedFields(comptime Fields: type) type {
+pub fn NormalizedFields(comptime defaults: bool, comptime Fields: type) type {
     const types = Bundle.flatTypes(Fields);
     for (types, 0..) |T, i| {
         ecs.component.assertComponent(T, "normalize");
         if (std.mem.indexOfScalar(type, types[0..i], T) != null)
             @compileError("normalize received duplicate component type: " ++ @typeName(T));
     }
-    const split = splitByStorage(expandRequire(&types));
+    const split = splitByStorage(if (defaults) expandRequire(&types) else &types);
     return struct {
         archetype: @Tuple(split.archetype),
         sparse_set: @Tuple(split.sparse_set),
@@ -174,11 +179,13 @@ pub fn expandRequire(comptime list: []const type) []const type {
     return expanded;
 }
 
-/// Checks registered ids, storage groups, uniqueness, byte lengths and requirement closure.
-/// Requirements may cross groups. Empty groups are valid for any row count.
+/// Checks registered ids, storage groups, uniqueness and byte lengths.
+/// With require_closed enabled, also checks requirement closure across both groups.
+/// Empty groups are valid for any row count.
 /// Inspects descriptors only; does not check buffer aliasing or component value contents.
 pub fn validateColumns(
     self: *const Self,
+    comptime require_closed: bool,
     archetype_columns: []const Column,
     sparse_columns: []const Column,
     row_count: usize,
@@ -194,6 +201,7 @@ pub fn validateColumns(
             for (columns[0..i]) |previous| {
                 if (previous.id.eql(column.id)) return false;
             }
+            if (!require_closed) continue;
             for (meta.require) |required| {
                 search: for (groups) |candidates| {
                     for (candidates) |candidate| {
@@ -317,8 +325,12 @@ test "group transposes reordered normalized rows and borrows the final storage" 
     defer registry.deinit();
     var calls: usize = 0;
     const batch = .{
-        normalize(.{ Position{ .x = 1, .y = 2 }, Probe{ .calls = &calls }, Health{ .value = 3 } }),
-        normalize(.{ Health{ .value = 6 }, Probe{ .calls = &calls }, Position{ .x = 4, .y = 5 } }),
+        normalize(true, .{
+            Position{ .x = 1, .y = 2 }, Probe{ .calls = &calls }, Health{ .value = 3 },
+        }),
+        normalize(true, .{
+            Health{ .value = 6 }, Probe{ .calls = &calls }, Position{ .x = 4, .y = 5 },
+        }),
     };
     const original = try group(&registry, batch);
     var copied = original;
@@ -344,7 +356,7 @@ test "group transposes reordered normalized rows and borrows the final storage" 
 test "group supports fixed arrays, empty batches and zero sized columns" {
     var registry = Self.init(std.testing.allocator);
     defer registry.deinit();
-    const row = normalize(.{ Tag{}, Health{ .value = 7 }, SparseTag{} });
+    const row = normalize(true, .{ Tag{}, Health{ .value = 7 }, SparseTag{} });
     const grouped = try group(&registry, [_]@TypeOf(row){ row, row });
     const columns = grouped.columns();
     try expectEqual(2, @TypeOf(grouped).row_count);
@@ -373,10 +385,13 @@ test "validateColumns checks shared cyclic requirements across storage groups" {
         .{ .id = registry.comp_reg.idOf(G.Shared).?, .ptr = &.{} },
     };
     const sparse = [_]Column{.{ .id = registry.comp_reg.idOf(G.Right).?, .ptr = &.{} }};
-    try expect(validateColumns(&registry, &dense, &sparse, 0));
-    try expect(!validateColumns(&registry, dense[0..2], &sparse, 0));
-    try expect(!validateColumns(&registry, &dense, &.{}, 0));
-    try expect(!validateColumns(&registry, &.{}, &sparse, 0));
+    try expect(validateColumns(&registry, true, &dense, &sparse, 0));
+    try expect(!validateColumns(&registry, true, dense[0..2], &sparse, 0));
+    try expect(!validateColumns(&registry, true, &dense, &.{}, 0));
+    try expect(!validateColumns(&registry, true, &.{}, &sparse, 0));
+    try expect(validateColumns(&registry, false, dense[0..2], &sparse, 0));
+    try expect(validateColumns(&registry, false, &dense, &.{}, 0));
+    try expect(validateColumns(&registry, false, &.{}, &sparse, 0));
 }
 test "validateColumns rejects unknown, stale and reserved column ids" {
     var registry = Self.init(std.testing.allocator);
@@ -384,9 +399,13 @@ test "validateColumns rejects unknown, stale and reserved column ids" {
     const position = try registry.comp_reg.register(Position);
     const reserved = try registry.comp_reg.reserve(TypeId.of(Probe));
     const stale = CompId.init(position.index.get(), position.generation.next().get());
-    try expect(validateColumns(&registry, &.{.{ .id = position, .ptr = &.{} }}, &.{}, 0));
-    for ([_]CompId{ .invalid, CompId.init(100, 0), stale, reserved }) |invalid| {
-        try expect(!validateColumns(&registry, &.{.{ .id = invalid, .ptr = &.{} }}, &.{}, 0));
+    inline for (.{ true, false }) |require_closed| {
+        const valid = [_]Column{.{ .id = position, .ptr = &.{} }};
+        try expect(validateColumns(&registry, require_closed, &valid, &.{}, 0));
+        for ([_]CompId{ .invalid, CompId.init(100, 0), stale, reserved }) |invalid| {
+            const columns = [_]Column{.{ .id = invalid, .ptr = &.{} }};
+            try expect(!validateColumns(&registry, require_closed, &columns, &.{}, 0));
+        }
     }
 }
 
@@ -399,15 +418,17 @@ test "validateColumns rejects wrong storage, duplicates, lengths and size overfl
     const healths = [_]Health{ .{ .value = 5 }, .{ .value = 6 } };
     const dense = Column{ .id = position, .ptr = std.mem.sliceAsBytes(&positions) };
     const sparse = Column{ .id = health, .ptr = std.mem.sliceAsBytes(&healths) };
-    try expect(validateColumns(&registry, &.{dense}, &.{sparse}, 2));
-    try expect(!validateColumns(&registry, &.{sparse}, &.{dense}, 2));
-    try expect(!validateColumns(&registry, &.{ dense, dense }, &.{sparse}, 2));
-    try expect(!validateColumns(&registry, &.{dense}, &.{ sparse, sparse }, 2));
-    for ([_]usize{ 0, 1, 3, std.math.maxInt(usize) }) |count|
-        try expect(!validateColumns(&registry, &.{dense}, &.{sparse}, count));
     const truncated = Column{ .id = position, .ptr = dense.ptr[0 .. dense.ptr.len - 1] };
-    try expect(!validateColumns(&registry, &.{truncated}, &.{}, 2));
-    try expect(validateColumns(&registry, &.{}, &.{}, 3));
+    inline for (.{ true, false }) |require_closed| {
+        try expect(validateColumns(&registry, require_closed, &.{dense}, &.{sparse}, 2));
+        try expect(!validateColumns(&registry, require_closed, &.{sparse}, &.{dense}, 2));
+        try expect(!validateColumns(&registry, require_closed, &.{ dense, dense }, &.{sparse}, 2));
+        try expect(!validateColumns(&registry, require_closed, &.{dense}, &.{ sparse, sparse }, 2));
+        for ([_]usize{ 0, 1, 3, std.math.maxInt(usize) }) |count|
+            try expect(!validateColumns(&registry, require_closed, &.{dense}, &.{sparse}, count));
+        try expect(!validateColumns(&registry, require_closed, &.{truncated}, &.{}, 2));
+        try expect(validateColumns(&registry, require_closed, &.{}, &.{}, 3));
+    }
 }
 
 test "normalize flattens bundles and preserves explicit component values" {
@@ -417,7 +438,7 @@ test "normalize flattens bundles and preserves explicit component values" {
         health: Health,
     };
     var calls: usize = 0;
-    const normalized = normalize(.{
+    const normalized = normalize(true, .{
         .nested = Nested{ .position = .{ .x = 3, .y = 4 }, .health = .{ .value = 7 } },
         .probe = Probe{ .calls = &calls },
     });
@@ -428,16 +449,48 @@ test "normalize flattens bundles and preserves explicit component values" {
     try expectEqual(7, normalized.sparse_set[0].value);
     try expectEqual(0, calls);
 
-    const empty = normalize(.{});
+    const empty = normalize(true, .{});
     try expectEqual(0, empty.archetype.len);
     try expectEqual(0, empty.sparse_set.len);
+}
+
+test "normalize without defaults keeps explicit fields and does not construct requirements" {
+    const G = RequirementGraph;
+    G.Right.calls = 0;
+    G.Shared.created = 0;
+    const explicit = normalize(false, .{ G.Root{ .value = 5 }, Health{ .value = 7 } });
+    try expect(@TypeOf(explicit.archetype) == @Tuple(&.{G.Root}));
+    try expect(@TypeOf(explicit.sparse_set) == @Tuple(&.{Health}));
+    try expectEqual(5, explicit.archetype[0].value);
+    try expectEqual(7, explicit.sparse_set[0].value);
+    try expectEqual(0, G.Right.calls);
+    try expectEqual(0, G.Shared.created);
+
+    const Root = struct {
+        pub const se_component: ecs.component.Mark = .{ .require = &.{Position} };
+    };
+    const Nested = struct {
+        pub const se_bundle: Bundle.Mark = .{};
+        root: Root,
+        probe: Probe,
+    };
+    var calls: usize = 0;
+    const fields = .{Nested{ .root = .{}, .probe = .{ .calls = &calls } }};
+    // Position has no default constructor, but explicit-only normalization must still compile.
+    var normalized = normalize(false, fields);
+    try expect(@TypeOf(normalized.archetype) == @Tuple(&.{ Root, Probe }));
+    try expectEqual(0, normalized.sparse_set.len);
+    deinitDefaults(fields, &normalized);
+    try expectEqual(0, calls);
+    const empty = normalize(false, .{});
+    try expectEqual(0, empty.archetype.len + empty.sparse_set.len);
 }
 
 test "normalize completes cyclic requirements once and honors explicit overrides" {
     const G = RequirementGraph;
     G.Right.calls = 0;
     G.Shared.created = 0;
-    const normalized = normalize(.{G.Root{ .value = 5 }});
+    const normalized = normalize(true, .{G.Root{ .value = 5 }});
     try expect(@TypeOf(normalized.archetype) == @Tuple(&.{ G.Root, G.Left, G.Shared }));
     try expect(@TypeOf(normalized.sparse_set) == @Tuple(&.{G.Right}));
     try expectEqual(5, normalized.archetype[0].value);
@@ -446,10 +499,10 @@ test "normalize completes cyclic requirements once and honors explicit overrides
     try expectEqual(1, G.Shared.created);
     try expectEqual(1, G.Right.calls);
 
-    const overridden = normalize(.{ G.Right{ .value = 99 }, G.Root{ .value = 6 } });
+    const overridden = normalize(true, .{ G.Right{ .value = 99 }, G.Root{ .value = 6 } });
     try expectEqual(99, overridden.sparse_set[0].value);
     try expectEqual(1, G.Right.calls);
-    _ = normalize(.{G.Root{ .value = 7 }});
+    _ = normalize(true, .{G.Root{ .value = 7 }});
     try expectEqual(2, G.Right.calls);
 }
 test "component byte access preserves constness and resolves storage through registry lookups" {

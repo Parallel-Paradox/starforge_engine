@@ -42,10 +42,10 @@ pub fn addBatch(self: *Self, batch: anytype, ids: []Entity.Id) AddError!void {
 
     comptime var types: [batch.len]type = undefined;
     inline for (batch, 0..) |fields, i| {
-        types[i] = NormalizedFields(@TypeOf(fields));
+        types[i] = NormalizedFields(true, @TypeOf(fields));
     }
     var normalized: @Tuple(&types) = undefined;
-    inline for (batch, 0..) |fields, i| normalized[i] = normalize(fields);
+    inline for (batch, 0..) |fields, i| normalized[i] = normalize(true, fields);
     errdefer inline for (batch, 0..) |fields, i| {
         if (ids[i].eql(.invalid))
             deinitDefaults(fields, &normalized[i]);
@@ -68,7 +68,7 @@ pub fn addBatchImpl(
     ids: []Entity.Id,
 ) AddError!void {
     @memset(ids, .invalid);
-    std.debug.assert(self.validateColumns(archetype_columns, sparse_columns, ids.len));
+    std.debug.assert(self.validateColumns(true, archetype_columns, sparse_columns, ids.len));
     if (ids.len == 0) return;
 
     const allocator = self.allocator;
